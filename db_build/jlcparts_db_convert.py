@@ -329,7 +329,8 @@ class JlcpcbFTS5(Generate):
                 'Description',
                 'Datasheet' unindexed,
                 'Price' unindexed,
-                'Stock' unindexed
+                'Stock' unindexed,
+                'Attributes' unindexed,
             , tokenize="trigram")
             """
         )
@@ -482,12 +483,13 @@ class JlcpcbFTS5(Generate):
                     c[8],  # Datasheet
                     price_str,  # Price
                     str(c[9]),  # Stock
+                    str(json.dumps(extra.get('attributes', {})))
                 )
                 rows.append(row)
 
             print("Inserting into parts table")
             self.conn.executemany(
-                "INSERT INTO parts VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+                "INSERT INTO parts VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
             )
             self.conn.commit()
 

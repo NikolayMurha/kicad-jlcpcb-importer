@@ -358,3 +358,45 @@ class PartSelectorDataModel(dv.PyDataViewModel):
     def get_stock(self, item):
         """Get the reference of an item."""
         return self.ItemToObject(item)[self.columns["STOCK_COL"]]
+
+    def get_category(self, item):
+        """Get the first (root) category for the item if present.
+
+        When populating the model, the UI inserts an extra 'Params' column at
+        index 5, which shifts the original 'First Category' (index 9) to 10.
+        """
+        row = self.ItemToObject(item)
+        try:
+            return row[10]
+        except Exception:
+            return ""
+
+    def get_mfr_number(self, item):
+        """Get the MFR part number."""
+        try:
+            return self.ItemToObject(item)[self.columns["MFR_NUMBER_COL"]]
+        except Exception:
+            return ""
+
+    def get_manufacturer(self, item):
+        """Get the manufacturer name."""
+        try:
+            return self.ItemToObject(item)[self.columns["MFR_COL"]]
+        except Exception:
+            return ""
+
+    def get_description(self, item):
+        """Get part description."""
+        try:
+            return self.ItemToObject(item)[self.columns["DESCR_COL"]]
+        except Exception:
+            return ""
+
+    def get_attributes(self, item):
+        """Get the Attributes JSON string from the search row (last column)."""
+        try:
+            row = self.ItemToObject(item)
+            # After inserting Params at index 5, 'Attributes' ends up at index 11
+            return row[11]
+        except Exception:
+            return ""

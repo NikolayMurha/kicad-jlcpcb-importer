@@ -1,2 +1,6 @@
 jlcpcb/*
 db_build/db_working/*
+lib/*
+!lib/.gitkeep
+__pycache__/
+*.pyc

@@ -297,6 +297,18 @@ class PartSelectorDialog(wx.Dialog):
             wx.LEFT | wx.RIGHT | wx.BOTTOM,
             5,
         )
+        # Explicit search button to the right of the keyword field
+        self.search_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "Search",
+            wx.DefaultPosition,
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(100, -1)),
+            0,
+        )
+        self.search_button.SetBitmap(loadBitmapScaled("mdi-magnify.png", self.scale_factor))
+        self.search_button.SetBitmapMargins((2, 0))
+        keyword_search_row1.Add(self.search_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         search_sizer_one = wx.BoxSizer(wx.VERTICAL)
         search_sizer_one.Add(manufacturer_label, 0, wx.ALL, 5)
@@ -399,15 +411,17 @@ class PartSelectorDialog(wx.Dialog):
 
         search_sizer.Add(search_sizer_row2)
 
-        self.keyword.Bind(wx.EVT_TEXT, self.search_dwell)
+        # Remove automatic search on typing; bind Enter to perform search
+        self.keyword.Bind(wx.EVT_TEXT_ENTER, self.search)
         self.ohm_button.Bind(wx.EVT_BUTTON, self.add_ohm_symbol)
         self.micro_button.Bind(wx.EVT_BUTTON, self.add_micro_symbol)
-        self.manufacturer.Bind(wx.EVT_TEXT, self.search_dwell)
-        self.package.Bind(wx.EVT_TEXT, self.search_dwell)
+        self.manufacturer.Bind(wx.EVT_TEXT_ENTER, self.search)
+        self.package.Bind(wx.EVT_TEXT_ENTER, self.search)
         self.category.Bind(wx.EVT_COMBOBOX, self.update_subcategories)
         self.category.Bind(wx.EVT_TEXT, self.update_subcategories)
-        self.part_no.Bind(wx.EVT_TEXT, self.search_dwell)
-        self.solder_joints.Bind(wx.EVT_TEXT, self.search_dwell)
+        self.part_no.Bind(wx.EVT_TEXT_ENTER, self.search)
+        self.solder_joints.Bind(wx.EVT_TEXT_ENTER, self.search)
+        self.search_button.Bind(wx.EVT_BUTTON, self.search)
         help_button.Bind(wx.EVT_BUTTON, self.help)
 
         # Enable type-ahead selection for read-only ComboBoxes (category/subcategory)
@@ -550,22 +564,22 @@ class PartSelectorDialog(wx.Dialog):
             0,
         )
         # New action buttons
-        self.open_datasheet_button = wx.Button(
-            self,
-            wx.ID_ANY,
-            "Open Datasheet",
-            wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
-            0,
-        )
-        self.open_lcsc_button = wx.Button(
-            self,
-            wx.ID_ANY,
-            "Open LCSC Page",
-            wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
-            0,
-        )
+        # self.open_datasheet_button = wx.Button(
+        #     self,
+        #     wx.ID_ANY,
+        #     "Open Datasheet",
+        #     wx.DefaultPosition,
+        #     HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+        #     0,
+        # )
+        # self.open_lcsc_button = wx.Button(
+        #     self,
+        #     wx.ID_ANY,
+        #     "Open LCSC Page",
+        #     wx.DefaultPosition,
+        #     HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+        #     0,
+        # )
         # Image preview
         self.preview_image = wx.StaticBitmap(
             self,
@@ -583,8 +597,8 @@ class PartSelectorDialog(wx.Dialog):
 
         self.select_part_button.Bind(wx.EVT_BUTTON, self.select_part)
         self.part_details_button.Bind(wx.EVT_BUTTON, self.get_part_details)
-        self.open_datasheet_button.Bind(wx.EVT_BUTTON, self.open_datasheet)
-        self.open_lcsc_button.Bind(wx.EVT_BUTTON, self.open_lcsc_page)
+        # self.open_datasheet_button.Bind(wx.EVT_BUTTON, self.open_datasheet)
+        # self.open_lcsc_button.Bind(wx.EVT_BUTTON, self.open_lcsc_page)
 
         self.select_part_button.SetBitmap(
             loadBitmapScaled(
@@ -602,27 +616,47 @@ class PartSelectorDialog(wx.Dialog):
         )
         self.part_details_button.SetBitmapMargins((2, 0))
 
-        self.open_datasheet_button.SetBitmap(
-            loadBitmapScaled(
-                "mdi-file-document-outline.png",
-                self.scale_factor,
-            )
-        )
-        self.open_datasheet_button.SetBitmapMargins((2, 0))
-        self.open_lcsc_button.SetBitmap(
-            loadBitmapScaled(
-                "mdi-earth.png",
-                self.scale_factor,
-            )
-        )
-        self.open_lcsc_button.SetBitmapMargins((2, 0))
+        # self.open_datasheet_button.SetBitmap(
+        #     loadBitmapScaled(
+        #         "mdi-file-document-outline.png",
+        #         self.scale_factor,
+        #     )
+        # )
+        # self.open_datasheet_button.SetBitmapMargins((2, 0))
+        # self.open_lcsc_button.SetBitmap(
+        #     loadBitmapScaled(
+        #         "mdi-earth.png",
+        #         self.scale_factor,
+        #     )
+        # )
+        # self.open_lcsc_button.SetBitmapMargins((2, 0))
 
         tool_sizer = wx.BoxSizer(wx.VERTICAL)
         tool_sizer.Add(self.select_part_button, 0, wx.ALL, 5)
         tool_sizer.Add(self.part_details_button, 0, wx.ALL, 5)
-        tool_sizer.Add(self.open_datasheet_button, 0, wx.ALL, 5)
-        tool_sizer.Add(self.open_lcsc_button, 0, wx.ALL, 5)
+        # tool_sizer.Add(self.open_datasheet_button, 0, wx.ALL, 5)
+        # tool_sizer.Add(self.open_lcsc_button, 0, wx.ALL, 5)
         tool_sizer.Add(self.preview_image, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+
+        # Clear log button placed directly under preview
+        self.clear_log_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "Clear log",
+            wx.DefaultPosition,
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+            0,
+        )
+        self.clear_log_button.SetBitmap(
+            loadBitmapScaled("mdi-trash-can-outline.png", self.scale_factor)
+        )
+        self.clear_log_button.SetBitmapMargins((2, 0))
+        # Delegate action to the parent host if available
+        self.clear_log_button.Bind(
+            wx.EVT_BUTTON,
+            lambda _evt: getattr(self.parent, "_clear_log", lambda *_: None)(),
+        )
+        tool_sizer.Add(self.clear_log_button, 0, wx.ALL, 5)
         table_sizer.Add(tool_sizer, 3, wx.EXPAND, 5)
 
         # ---------------------------------------------------------------------
@@ -657,8 +691,7 @@ class PartSelectorDialog(wx.Dialog):
             ),
         )
 
-        # initiate a debounced search now that settings have changed
-        self.search_timer.StartOnce(self._debounce_ms)
+        # No automatic search; user triggers search explicitly
 
     @staticmethod
     def get_existing_selection(parts):
@@ -692,8 +725,8 @@ class PartSelectorDialog(wx.Dialog):
         for b in [
             self.select_part_button,
             self.part_details_button,
-            self.open_datasheet_button,
-            self.open_lcsc_button,
+            # self.open_datasheet_button,
+            # self.open_lcsc_button,
         ]:
             b.Enable(bool(state))
 
@@ -745,8 +778,7 @@ class PartSelectorDialog(wx.Dialog):
             )
             self.subcategory.AppendItems(subcategories)
 
-        # search (debounced) now that categories might have changed
-        self.search_timer.StartOnce(self._debounce_ms)
+        # Do not trigger an automatic search on category change
 
     def get_price(self, quantity, prices) -> float:
         """Find the price for the number of selected parts accordning to the price ranges."""
@@ -924,7 +956,7 @@ class PartSelectorDialog(wx.Dialog):
         The others are not by default.\n
         The keyword search field is applied to "LCSC Part", "Description", "MFR.Part",
         "Package" and "Manufacturer".\n
-        Searching occurs as input fields are changed.\n
+        Click the Search button or press Enter in a search field to update results.\n
         The results are limited to 1000.
         """
         wx.MessageBox(text, title, style=wx.ICON_INFORMATION)

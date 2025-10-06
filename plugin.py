@@ -4,7 +4,7 @@ import os
 
 from pcbnew import ActionPlugin  # pylint: disable=import-error
 
-from .assign_main import AssignLCSCMainDialog
+# Import lazily in Run to avoid registration failures if deps are missing
 
 
 class JLCPCBPlugin(ActionPlugin):
@@ -23,6 +23,7 @@ class JLCPCBPlugin(ActionPlugin):
 
     def Run(self):
         """Overwrite Run."""
+        from .assign_main import AssignLCSCMainDialog  # local import to avoid import-time errors
         dialog = AssignLCSCMainDialog()
         dialog.Center()
         dialog.Show()

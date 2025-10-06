@@ -198,6 +198,7 @@ class Library:
             "Description",
             "Price",
             "First Category",
+            "Attributes",
         ]
         s = ",".join(f'"{c}"' for c in columns)
         query = f"SELECT {s} FROM parts WHERE "
