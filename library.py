@@ -106,12 +106,16 @@ class Library:
 
         Returns True if the global database is used.
         """
+        # Do not create a local DB file just to detect its presence.
+        # If the file does not exist, prefer the global database.
+        if not os.path.exists(self.localcorrectionsdb_file):
+            return True
 
         try:
+            # Open read-only to avoid side effects
+            uri = f"file:{self.localcorrectionsdb_file}?mode=ro"
             with (
-                contextlib.closing(
-                    sqlite3.connect(self.localcorrectionsdb_file)
-                ) as ldb,
+                contextlib.closing(sqlite3.connect(uri, uri=True)) as ldb,
                 ldb as lcur,
             ):
                 result = lcur.execute(
@@ -119,12 +123,10 @@ class Library:
                 ).fetchone()
                 if not result:
                     return True
-
                 return result[0] != 1
         except sqlite3.OperationalError:
+            # Read-only open failed or DB invalid; fallback to global
             return True
-
-        return True
 
     def switch_to_global_correction_database(self, use_global):
         """Switches to global or board local database."""

@@ -23,7 +23,7 @@ class JLCPCBPlugin(ActionPlugin):
 
     def Run(self):
         """Overwrite Run."""
-        from .assign_main import AssignLCSCMainDialog  # local import to avoid import-time errors
+        from .mainwindow import AssignLCSCMainDialog  # local import to avoid import-time errors
         dialog = AssignLCSCMainDialog()
         dialog.Center()
         dialog.Show()

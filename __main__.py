@@ -3,7 +3,7 @@
 import wx
 
 from . import standalone_impl
-from .assign_main import AssignLCSCMainDialog
+from .mainwindow import AssignLCSCMainDialog
 
 if __name__ == "__main__":
     print("starting jlcpcbtools standalone mode...")  # noqa: T201
