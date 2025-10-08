@@ -149,10 +149,11 @@ class PartDetailsDialog(wx.Dialog):
         right_side_layout = wx.BoxSizer(wx.VERTICAL)
         right_side_layout.Add(self.image, 10, wx.ALL | wx.EXPAND, 5)
         right_side_layout.AddStretchSpacer(50)
-        right_side_layout.Add(self.savepdf_button, 5, wx.LEFT | wx.RIGHT | wx.EXPAND, 5)
-        right_side_layout.Add(self.openpdf_button, 5, wx.LEFT | wx.RIGHT | wx.EXPAND, 5)
+        # Add vertical spacing between action buttons
+        right_side_layout.Add(self.savepdf_button, 5, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 5)
+        right_side_layout.Add(self.openpdf_button, 5, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 5)
         right_side_layout.Add(
-            self.openpage_button, 5, wx.LEFT | wx.RIGHT | wx.EXPAND, 5
+            self.openpage_button, 5, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 5
         )
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.data_list, 30, wx.ALL | wx.EXPAND, 5)

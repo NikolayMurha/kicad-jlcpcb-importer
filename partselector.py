@@ -666,7 +666,7 @@ class PartSelectorDialog(wx.Dialog):
         # ---------------------------------------------------------------------
 
         layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(search_sizer, 1, wx.ALL, 5)
+        layout.Add(search_sizer, 1, wx.ALL | wx.EXPAND, 5)
         # layout.Add(self.search_button, 5, wx.ALL, 5)
         layout.Add(result_sizer, 1, wx.LEFT, 5)
         layout.Add(table_sizer, 20, wx.ALL | wx.EXPAND, 5)
