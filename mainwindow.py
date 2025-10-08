@@ -1,7 +1,6 @@
 """Assign LCSC main dialog wrapping the part selector as primary UI."""
 
 import os
-import re
 import json
 import sys
 import logging
@@ -10,7 +9,7 @@ import shutil
 import threading
 from pathlib import Path
 import wx
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, Dict
 
 from .partselector import PartSelectorDialog
 from .settings import SettingsDialog
@@ -30,7 +29,6 @@ from .events import (
     MessageEvent,
 )
 from .library import Library
-from .lib_tables import LibTablesManager
 from .easyeda_importer import EasyedaImporter
 
 import pcbnew as kicad_pcbnew  # pylint: disable=import-error
@@ -643,7 +641,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
             # Successful install path: make lib visible and validate import
             try:
-                import site, importlib
+                import site
+                import importlib
                 site.addsitedir(str(lib_dir))
                 if str(lib_dir) not in sys.path:
                     sys.path.insert(0, str(lib_dir))

@@ -1,10 +1,14 @@
 # KiCad JLCPCB Importer
 
-Thanks and credit to the original project that inspired this work: https://github.com/Bouni/kicad-jlcpcb-tools
+<!-- markdownlint-disable MD013 -->
+
+Thanks and credit to the original project that inspired this work:
+[Bouni/kicad-jlcpcb-importer](https://github.com/Bouni/kicad-jlcpcb-importer)
 
 - Tested with KiCad 9
 
 What it does
+
 - Search LCSC/JLCPCB catalog and assign LCSC numbers to footprints
 - Import symbol, footprint and 3D model via easyeda2kicad for a selected LCSC part
 - Choose where to store generated libraries: Project or System (KiCad 9 3rd‑party locations)
@@ -12,6 +16,7 @@ What it does
 - Configurable library prefix (default: `LCSC_`) and project library folder (default: `library`)
 
 Screenshots
+
 - Search: `images/search.png`
 
 ![Search](images/search.png)
@@ -50,21 +55,21 @@ From there you can install the plugin via the GUI.
 
 Simply clone this repo into your `scripting/plugins` folder.
 
-**Windows**
+#### Windows
 
 ```sh
-cd C:\users\<username>\Documents\kicad\<version>\scripting\plugins\  # <username> is your username, <version> can be 7.0, 8.0, or X.YY depending on the version you use
+cd C:\users\{username}\Documents\kicad\{version}\scripting\plugins\
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
-**Linux**
+#### Linux
 
 ```sh
-cd /home/<username>/.local/share/kicad/<version>/scripting/plugins  # <version> can be 7.0, 8.0, or X.YY depending on the version you use
+cd /home/{username}/.local/share/kicad/{version}/scripting/plugins
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
-**MacOS**
+#### macOS
 
 ```sh
 cd ~/Library/Preferences/kicad/scripting/plugins
@@ -82,11 +87,11 @@ In order to get it working you can run the following 3 commands:
 2. `python -m ensurepip --upgrade`
 3. `/var/data/python/bin/pip3 install requests`
 
-See [issue #94](https://github.com/Bouni/kicad-jlcpcb-tools/issues/94) for more info.
+See [issue #94](https://github.com/Bouni/kicad-jlcpcb-importer/issues/94) for more info.
 
 ## Usage 🥳
 
-To access the plugin choose `Tools → External Plugins → JLCPCB Tools` from the *PCB Editor* menus
+To access the plugin choose `Tools → External Plugins → JLCPCB Importer` from the *PCB Editor* menus
 
 Checkout this screencast, it shows quickly how to use this plugin:
 
@@ -97,19 +102,19 @@ Checkout this screencast, it shows quickly how to use this plugin:
 When you choose System as the storage location, generated libraries are placed under KiCad’s 3rd‑party folders.
 
 - macOS
-  - `/Users/<user>/Documents/KiCad/9.0/3rdparty/symbols/<plugin_dir_name>`
-  - `/Users/<user>/Documents/KiCad/9.0/3rdparty/footprints/<plugin_dir_name>`
-  - `/Users/<user>/Documents/KiCad/9.0/3rdparty/3dmodels/<plugin_dir_name>`
+  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/symbols/{plugin_dir_name}`
+  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/footprints/{plugin_dir_name}`
+  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
 
 - Linux
-  - `~/.local/share/kicad/9.0/3rdparty/symbols/<plugin_dir_name>`
-  - `~/.local/share/kicad/9.0/3rdparty/footprints/<plugin_dir_name>`
-  - `~/.local/share/kicad/9.0/3rdparty/3dmodels/<plugin_dir_name>`
+  - `~/.local/share/kicad/9.0/3rdparty/symbols/{plugin_dir_name}`
+  - `~/.local/share/kicad/9.0/3rdparty/footprints/{plugin_dir_name}`
+  - `~/.local/share/kicad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
 
 - Windows
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\symbols\<plugin_dir_name>`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\footprints\<plugin_dir_name>`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\3dmodels\<plugin_dir_name>`
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\symbols\{plugin_dir_name}`
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\footprints\{plugin_dir_name}`
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\3dmodels\{plugin_dir_name}`
 
 ## Icons
 
@@ -173,7 +178,7 @@ To use the plugin in standlone mode you'll need to identify three pieces of info
 
 #### Python
 
-The <i><b>{KiCad python}</b></i> should be used, this can be found at different locations depending on your system:
+The `{KiCad python}` should be used, this can be found at different locations depending on your system:
 
 | OS | Kicad python |
 |---|---|
@@ -183,64 +188,63 @@ The <i><b>{KiCad python}</b></i> should be used, this can be found at different 
 
 #### Working directory
 
-The <i><b>{working directory}</b></i> should be your plugins directory, ie:
+The `{working directory}` should be your plugins directory, ie:
 
 | OS | Working dir |
 |---|---|
-|Mac| ~/Documents/KiCad/<version>/scripting/plugins/ |
-|Linux| ~/.local/share/kicad/<version>/scripting/plugins/ |
-|Windows| %USERPROFILE%\Documents\KiCad\<version>\scripting\plugins\ |
+|Mac| ~/Documents/KiCad/{version}/scripting/plugins/ |
+|Linux| ~/.local/share/kicad/{version}/scripting/plugins/ |
+|Windows| %USERPROFILE%\Documents\KiCad\{version}\scripting\plugins\ |
 
 > [!NOTE]  
-> <version> can be 7.0, 8.0, or X.YY depending on the version you use
+> `{version}` can be 7.0, 8.0, or X.YY depending on the version you use
 
 #### Plugin folder name
 
-The <i><b>{kicad-jlcpcb-tools folder name}</b></i> should be the name of the kicad-jlcpcb-tools folder.
+The `{kicad-jlcpcb-importer folder name}` should be the name of the kicad-jlcpcb-importer folder.
 
 - For Kicad managed plugins this may be like
 
-> com_github_bouni_kicad-jlcpcb-tools
+> com_github_bouni_kicad-jlcpcb-importer
 
-- If you are developing kicad-jlcpcb-tools this is the folder you cloned the kicad-jlcpcb-tools as.
+- If you are developing kicad-jlcpcb-importer this is the folder you cloned the kicad-jlcpcb-importer as.
 
 #### Command line
 
-- Change to the working directory as noted above
-- Run the python interpreter with the <i><b>{kicad-jlcpcb-tools folder name}</b></i> folder as a module.
+- Change to the working directory as noted above.
+- Run the python interpreter with the `{kicad-jlcpcb-importer folder name}` folder as a module.
 
 For example:
 
 ```sh
 cd {working directory}
-{kicad_python} -m {kicad-jlcpcb-tools folder name}
+{kicad_python} -m {kicad-jlcpcb-importer folder name}
 ```
 
 For example on Mac:
 
 ```sh
-/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 -m kicad-jlcpcb-tools
+/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 -m kicad-jlcpcb-importer
 ```
 
 For example on Linux:
 
 ```sh
-cd ~/.local/share/kicad/8.0/scripting/plugins/ && python -m kicad-jlcpcb-tools
+cd ~/.local/share/kicad/8.0/scripting/plugins/ && python -m kicad-jlcpcb-importer
 ```
 
 For example on Windows:
 
 ```cmd
-& 'C:\Program Files\KiCad\8.0\bin\python.exe' -m kicad-jlcpcb-tools
+& 'C:\Program Files\KiCad\8.0\bin\python.exe' -m kicad-jlcpcb-importer
 ```
 
 #### IDE
 
-- Configure the command line to be '{kicad_python} -m {kicad-jlcpcb-tools folder name}'
+- Configure the command line to be '{kicad_python} -m {kicad-jlcpcb-importer folder name}'
 - Set the working directory to {working directory}
 
-If using PyCharm or Jetbrains IDEs, set the interpreter to Kicad's python, <i><b>{Kicad python}</b></i> and under 'run configuration' select Python.
+If using PyCharm or JetBrains IDEs, set the interpreter to KiCad's python, `{Kicad python}` and under 'run configuration' select Python.
 
 Click on 'script path' and change instead to 'module name',
-entering the name of the kicad-jlcpcb-tools folder, <i><b>{kicad-jlcpcb-tools folder name}</b></i>.
-
+entering the name of the kicad-jlcpcb-importer folder, `{kicad-jlcpcb-importer folder name}`.
