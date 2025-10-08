@@ -479,7 +479,7 @@ class Library:
         wx.PostEvent(self.parent, DownloadStartedEvent())
 
         # Define basic variables
-        url_stub = "https://bouni.github.io/kicad-jlcpcb-tools/"
+        url_stub = "https://nikolaymurha.github.io/kicad-jlcpcb-importer"
         cnt_file = "chunk_num_fts5.txt"
         progress_file = os.path.join(self.datadir, "progress.txt")
         chunk_file_stub = "parts-fts5.db.zip."
