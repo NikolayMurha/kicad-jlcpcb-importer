@@ -1,3 +1,3 @@
 # Third-party runtime dependencies installed into the plugin's lib/ folder
-easyeda2kicad
-
+# Use fork from GitHub; pin to a branch/tag/commit for reproducibility
+easyeda2kicad @ git+https://github.com/NikolayMurha/easyeda2kicad.py.git@3861f2621bc98a9a9995991c35db3d14b0d8fe27

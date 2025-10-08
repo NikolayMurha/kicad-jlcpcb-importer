@@ -77,8 +77,8 @@ class LibTablesManager:
         lib_base = lib_dir
 
         self._log(
-            f"Оновлення таблиць бібліотек у: {project_dir}\n"
-            f"Знайдено символів: {len(sym_files)}; footprint libs: {len(pretty_dirs)}\n"
+            f"Updating library tables in: {project_dir}\n"
+            f"Found symbols: {len(sym_files)}; footprint libs: {len(pretty_dirs)}\n"
         )
 
         sym_content = self._read(sym_tbl)
@@ -98,7 +98,7 @@ class LibTablesManager:
                 uri = sym.resolve().as_posix()
             name = self._unique_name(sym.stem, sym_content)
             if self._ensure_entry(sym_tbl, "sym", name, uri):
-                self._log(f"Додано symbol lib: {name} -> {uri}\n")
+                self._log(f"Added symbol lib: {name} -> {uri}\n")
                 sym_content = self._read(sym_tbl)
                 changes += 1
 
@@ -114,20 +114,19 @@ class LibTablesManager:
                 uri = pd.resolve().as_posix()
             name = self._unique_name(pd.stem, fp_content)
             if self._ensure_entry(fp_tbl, "fp", name, uri):
-                self._log(f"Додано footprint lib: {name} -> {uri}\n")
+                self._log(f"Added footprint lib: {name} -> {uri}\n")
                 fp_content = self._read(fp_tbl)
                 changes += 1
 
         if changes == 0:
             if not sym_files and not pretty_dirs:
                 self._log(
-                    "Не знайдено нових бібліотек для додавання. "
-                    "Переконайтеся, що easyeda2kicad згенерував *.kicad_sym та *.pretty у вказаній теці.\n"
+                    "No new libraries found to add. "
+                    "Ensure easyeda2kicad generated *.kicad_sym and *.pretty in the specified directory.\n"
                 )
             else:
                 self._log(
-                    "Бібліотеки вже присутні у sym-lib-table / fp-lib-table. Змін не потрібно.\n"
+                    "Libraries are already present in sym-lib-table / fp-lib-table. No changes needed.\n"
                 )
 
         return sym_files, pretty_dirs, lib_base
-

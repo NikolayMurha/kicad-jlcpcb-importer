@@ -78,7 +78,7 @@ class PartSelectorDialog(wx.Dialog):
             self,
             wx.ID_ANY,
             "Keywords",
-            size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
+            size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(100, 15)),
             style=wx.ALIGN_RIGHT,
         )
         self.keyword = wx.TextCtrl(
@@ -99,7 +99,7 @@ class PartSelectorDialog(wx.Dialog):
             HighResWxSize(getattr(self.parent, "window", self), wx.Size(20, -1)),
             0,
         )
-        self.ohm_button.SetToolTip("Append the Ω symbol to the search string")
+        self.ohm_button.SetToolTip("Insert Ω at cursor in the search field")
 
         self.micro_button = wx.Button(
             self,
@@ -109,7 +109,7 @@ class PartSelectorDialog(wx.Dialog):
             HighResWxSize(getattr(self.parent, "window", self), wx.Size(20, -1)),
             0,
         )
-        self.micro_button.SetToolTip("Append the µ symbol to the search string")
+        self.micro_button.SetToolTip("Insert µ at cursor in the search field")
 
         manufacturer_label = wx.StaticText(
             self,
@@ -279,10 +279,12 @@ class PartSelectorDialog(wx.Dialog):
 
         keyword_search_row1 = wx.BoxSizer(wx.HORIZONTAL)
         keyword_search_row1.Add(keyword_label, 0, wx.ALL, 5)
+        # Let the keyword field take remaining horizontal space and keep
+        # the buttons at their natural size on the right.
         keyword_search_row1.Add(
             self.keyword,
-            0,
-            wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            1,  # stretch to fill
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
             5,
         )
         keyword_search_row1.Add(
@@ -397,9 +399,9 @@ class PartSelectorDialog(wx.Dialog):
         )
         help_button.SetBitmapMargins((2, 0))
 
-        search_sizer = wx.StaticBoxSizer(wx.VERTICAL, self, "Search")
-
-        search_sizer.Add(keyword_search_row1)
+        search_sizer = wx.StaticBoxSizer(wx.VERTICAL, self)
+        # Make both rows expand to the full width of the StaticBox
+        search_sizer.Add(keyword_search_row1, 0, wx.EXPAND)
 
         search_sizer_row2 = wx.StaticBoxSizer(wx.HORIZONTAL, self)
         search_sizer_row2.Add(search_sizer_one, 0, wx.RIGHT, 20)
@@ -409,7 +411,7 @@ class PartSelectorDialog(wx.Dialog):
         search_sizer_row2.Add(search_sizer_five, 0, wx.RIGHT, 20)
         # search_sizer.Add(help_button, 0, wx.RIGHT, 20)
 
-        search_sizer.Add(search_sizer_row2)
+        search_sizer.Add(search_sizer_row2, 0, wx.EXPAND)
 
         # Remove automatic search on typing; bind Enter to perform search
         self.keyword.Bind(wx.EVT_TEXT_ENTER, self.search)
@@ -550,7 +552,7 @@ class PartSelectorDialog(wx.Dialog):
         self.select_part_button = wx.Button(
             self,
             wx.ID_ANY,
-            "Select part",
+            "Import part",
             wx.DefaultPosition,
             HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
             0,
@@ -731,12 +733,15 @@ class PartSelectorDialog(wx.Dialog):
             b.Enable(bool(state))
 
     def add_ohm_symbol(self, *_):
-        """Append the Ω symbol to the search string."""
-        self.keyword.AppendText("Ω")
+        """Insert the Ω symbol at the current caret position."""
+        # Insert at caret (or replace selection) and return focus to the field
+        self.keyword.WriteText("Ω")
+        self.keyword.SetFocus()
 
     def add_micro_symbol(self, *_):
-        """Append the µ symbol to the search string."""
-        self.keyword.AppendText("µ")
+        """Insert the µ symbol at the current caret position."""
+        self.keyword.WriteText("µ")
+        self.keyword.SetFocus()
 
     def search_dwell(self, *_):
         """Initiate a search once the timeout expires.

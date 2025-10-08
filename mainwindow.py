@@ -30,13 +30,10 @@ from .events import (
     MessageEvent,
 )
 from .library import Library
-from .symbol_editor import SymbolEditor
-from .footprint_editor import FootprintEditor
 from .lib_tables import LibTablesManager
 from .easyeda_importer import EasyedaImporter
 
 import pcbnew as kicad_pcbnew  # pylint: disable=import-error
-
 
 class KicadProvider:
     """KiCad provider for board access."""
@@ -160,9 +157,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         # Log resolved project context for clarity
         try:
             self.log(
-                f"Проєкт: {self.project_path}\n"
-                f"Плата: {self.board_name}\n"
-                f"Схема: {self.schematic_name}\n"
+                f"Project: {self.project_path}\n"
+                f"Board: {self.board_name}\n"
+                f"Schematic: {self.schematic_name}\n"
             )
         except Exception:
             pass
@@ -212,7 +209,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                     self.log(line)
             return proc.wait()
         except Exception as e:
-            self.log(f"Помилка виконання: {e}\n")
+            self.log(f"Execution error: {e}\n")
             return 1
 
     # Override: do not assign in this simplified window — show placeholder
@@ -225,13 +222,13 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             if getattr(self, "part_list", None) is None:
                 wx.PostEvent(
                     self,
-                    MessageEvent(title="Помилка", text="Список компонентів недоступний.", style="error"),
+                    MessageEvent(title="Error", text="Component list is unavailable.", style="error"),
                 )
                 return
             if self.part_list.GetSelectedItemsCount() <= 0:
                 wx.PostEvent(
                     self,
-                    MessageEvent(title="Немає вибору", text="Оберіть елемент у списку.", style="warning"),
+                    MessageEvent(title="No selection", text="Select an item in the list.", style="warning"),
                 )
                 return
             item = self.part_list.GetSelection()
@@ -260,13 +257,13 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             if not lcsc_id:
                 wx.PostEvent(
                     self,
-                    MessageEvent(title="Немає LCSC", text="У вибраному рядку немає LCSC ID.", style="warning"),
+                    MessageEvent(title="No LCSC", text="No LCSC ID in the selected row.", style="warning"),
                 )
                 return
         except Exception:
             wx.PostEvent(
                 self,
-                MessageEvent(title="Помилка", text="Не вдалося отримати LCSC ID.", style="error"),
+                MessageEvent(title="Error", text="Failed to obtain LCSC ID.", style="error"),
             )
             return
 
@@ -289,7 +286,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         scope = self._ensure_library_scope_selected()
         if not scope:
             wx.PostEvent(
-                self, LogboxAppendEvent(msg="Імпорт скасовано: не обрано місце збереження бібліотек.\n")
+                self, LogboxAppendEvent(msg="Import canceled: no library location selected.\n")
             )
             return
 
@@ -307,36 +304,36 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
         def _worker():
             wx.BeginBusyCursor()
-            wx.PostEvent(self, LogboxAppendEvent(msg="******* ПОЧАТИ ІМПОРТ *******\n"))
             try:
                 ok, lib_base = importer.import_part(
                     lcsc_id=lcsc_id,
                     category=category,
                     meta=meta or {},
                 )
+            except Exception as e:
+                wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
             finally:
                 wx.EndBusyCursor()
-                
+            
             if btn is not None:
                 wx.CallAfter(btn.Enable, True)
             
             if ok:
                 wx.PostEvent(
-                    self, LogboxAppendEvent(msg=f"Імпорт завершено. Файли у: {lib_base}\n")
+                    self, LogboxAppendEvent(msg=f"Import completed. Files at: {lib_base}\n")
                 )
                 wx.CallAfter(
                     wx.MessageBox,
-                    f"Імпортовано {lcsc_id} у проєкт.\nПапка: {lib_base}",
-                    "Готово",
+                    f"Imported {lcsc_id} into project.\nFolder: {lib_base}",
+                    "Done",
                     wx.ICON_INFORMATION,
                 )
-            
             else:
-                wx.PostEvent(self, LogboxAppendEvent(msg="Імпорт завершився з помилкою.\n"))
+                wx.PostEvent(self, LogboxAppendEvent(msg="Import finished with an error.\n"))
                 wx.CallAfter(
                     wx.MessageBox,
-                    "Не вдалося імпортувати компонент. Перевірте лог вище.",
-                    "Помилка",
+                    "Failed to import component. Check the log above.",
+                    "Error",
                     wx.ICON_ERROR,
                 )
         threading.Thread(target=_worker, daemon=True).start()
@@ -369,7 +366,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     def _ask_library_scope_dialog(self) -> Optional[str]:
         dlg = wx.Dialog(
             self,
-            title="Де зберігати бібліотеки?",
+            title="Where to store libraries?",
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
             size=HighResWxSize(self, wx.Size(420, 180)),
         )
@@ -378,15 +375,15 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             text = wx.StaticText(
                 dlg,
                 label=(
-                    "Де зберігати та яку бібліотеку використовувати для збереження?\n"
-                    "Виберіть місце для символів і футпрінтів."
+                    "Where to store and which library to use for saving?\n"
+                    "Choose location for symbols and footprints."
                 ),
             )
             vbox.Add(text, 0, wx.ALL | wx.EXPAND, 10)
 
             hbox = wx.BoxSizer(wx.HORIZONTAL)
-            btn_project = wx.Button(dlg, wx.ID_ANY, "На рівні проекту")
-            btn_system = wx.Button(dlg, wx.ID_ANY, "На рівні системи")
+            btn_project = wx.Button(dlg, wx.ID_ANY, "Project level")
+            btn_system = wx.Button(dlg, wx.ID_ANY, "System level")
             hbox.Add(btn_project, 1, wx.ALL | wx.EXPAND, 5)
             hbox.Add(btn_system, 1, wx.ALL | wx.EXPAND, 5)
             vbox.Add(hbox, 0, wx.ALL | wx.EXPAND, 5)
@@ -545,22 +542,24 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     # Dependency check and interactive installer
     def _check_and_offer_install_deps(self, force_prompt: bool = False):
         try:
+            # Check runtime deps: pip (easyeda2kicad) only
             __import__("easyeda2kicad")
             self._deps_ready = True
             self._update_select_enabled()
             return
-        except Exception:
+        except Exception as e:
+            self.log(f"Error: {e}\n")
             pass
 
         msg = (
-            "Бібліотека 'easyeda2kicad' не знайдена.\n"
-            "Встановити залежності зараз? (буде використано локальну теку 'lib/')"
+            "Required dependency (easyeda2kicad) not found.\n"
+            "Install pip dependencies into the local 'lib/' folder?"
         )
         if force_prompt or not self._deps_ready:
             dlg = wx.MessageDialog(
                 self,
                 message=msg,
-                caption="Встановити залежності",
+                caption="Install dependencies",
                 style=wx.YES_NO | wx.ICON_QUESTION,
             )
             res = dlg.ShowModal()
@@ -582,8 +581,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         lib_dir.mkdir(parents=True, exist_ok=True)
 
         if not req.exists():
-            self.log("requirements.txt не знайдено.\n")
-            wx.MessageBox("requirements.txt не знайдено", "Помилка", style=wx.ICON_ERROR)
+            self.log("requirements.txt not found.\n")
+            wx.MessageBox("requirements.txt not found", "Error", style=wx.ICON_ERROR)
             return
 
         # Resolve a real Python interpreter (KiCad on macOS sets sys.executable to the app binary)
@@ -600,20 +599,20 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             "--target",
             str(lib_dir),
         ]
-        self.log(f"Інтерпретатор: {py_exе}\n")
-        self.log(f"Запуск: {' '.join(cmd)}\n")
+        self.log(f"Interpreter: {py_exe}\n")
+        self.log(f"Command: {' '.join(cmd)}\n")
         wx.BeginBusyCursor()
 
         def _worker():
             try:
-                self.log(f"Виконую: {' '.join(cmd)}\n")
+                self.log(f"Running: {' '.join(cmd)}\n")
                 ret = self._run_and_stream(cmd)
             except Exception as e:  # process spawn/read failure
-                self.log(f"Помилка встановлення: {e}\n")
+                self.log(f"Installation error: {e}\n")
                 wx.CallAfter(
                     wx.MessageBox,
-                    "Не вдалося запустити встановлення залежностей.",
-                    "Помилка",
+                    "Failed to launch dependency installation.",
+                    "Error",
                     wx.ICON_ERROR,
                 )
                 ret = 1
@@ -624,40 +623,49 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             if ret != 0:
                 # Try to bootstrap pip if it was missing
                 try:
-                    self.log("Спроба встановити pip через ensurepip...\n")
+                    self.log("Attempting to install pip via ensurepip...\n")
                     ensure_cmd = [cmd[0], "-m", "ensurepip", "--upgrade"]
                     ret2 = self._run_and_stream(ensure_cmd)
                     if ret2 == 0:
-                        self.log("pip встановлено. Повторюю встановлення залежностей...\n")
+                        self.log("pip installed. Retrying dependency installation...\n")
                         ret = self._run_and_stream(cmd)
                 except Exception:
                     pass
                 if ret != 0:
-                    self.log("pip завершився з помилкою.\n")
+                    self.log("pip exited with an error.\n")
                     wx.CallAfter(
                         wx.MessageBox,
-                        "Не вдалося встановити залежності. Перевірте мережу/доступ до pip.",
-                        "Помилка",
+                        "Failed to install dependencies. Check network/pip access.",
+                        "Error",
                         wx.ICON_ERROR,
                     )
                     return
 
+            # Successful install path: make lib visible and validate import
             try:
+                import site, importlib
+                site.addsitedir(str(lib_dir))
                 if str(lib_dir) not in sys.path:
-                    sys.path.append(str(lib_dir))
+                    sys.path.insert(0, str(lib_dir))
+                importlib.invalidate_caches()
                 __import__("easyeda2kicad")
                 self._deps_ready = True
-                self.log("Залежності встановлено успішно.\n")
+                self.log("Dependencies installed successfully.\n")
                 wx.CallAfter(self._update_select_enabled)
-                wx.CallAfter(wx.MessageBox, "Залежності встановлено успішно.", "Готово", wx.ICON_INFORMATION)
-            except Exception:
-                self.log("Встановлення завершено, але імпорт не вдалось.\n")
+                wx.CallAfter(
+                    wx.MessageBox,
+                    "Dependencies installed successfully.",
+                    "Done",
+                    wx.ICON_INFORMATION,
+                )
+            except Exception as e:
+                self.log(f"Installation finished, but import failed: {e}.\n")
                 self._deps_ready = False
                 wx.CallAfter(self._update_select_enabled)
                 wx.CallAfter(
                     wx.MessageBox,
-                    "Встановлення завершено, але імпортувати не вдалось. Спробуйте перезапустити KiCad.",
-                    "Попередження",
+                    "Installation finished, but import failed. Try restarting KiCad.",
+                    "Warning",
                     wx.ICON_WARNING,
                 )
 
@@ -671,7 +679,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 if self._deps_ready:
                     btn.SetToolTip("")
                 else:
-                    btn.SetToolTip("Залежності не встановлено. Встановіть, щоб активувати.")
+                    btn.SetToolTip("Dependencies not installed. Install to enable.")
         except Exception:
             pass
 

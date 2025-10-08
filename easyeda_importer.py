@@ -114,15 +114,27 @@ class EasyedaImporter:
         ]
 
     def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, Path, bool]:
+
+        # Resolve generation settings from parent (with defaults)
+        try:
+            settings = getattr(self.parent_window, "settings", {}) or {}
+            general = settings.get("general", {}) or {}
+        except Exception:
+            general = {}
+        lib_prefix = str(general.get("lib_prefix", "JLCPCB_")).strip()
+        project_lib_dir = str(general.get("project_lib_dir", "library")).strip() or "library"
+
+        # Note: this is not a directory name. For easyeda2kicad this is the base
+        # name for files and folders; it will generate
+        # target_output_name.kicad_sym, target_output_name.pretty, target_output_name.3dshapes, etc.
+        target_output_name = f"{lib_prefix}{category}"
+        
         if self.is_system_scope:
             third_party = os.environ.get("KICAD9_3RD_PARTY")
             if third_party and isinstance(third_party, str) and third_party.strip():
                 base_path = Path(third_party)
             else:
                 base_path = Path(PLUGIN_PATH) / "libraries"
-            # Зверніть уваагу, що це не імя каталогу! Для easyedat2kicad це базове імя для файлів та каталогів;
-            # easyedat2kicad на базі цього створить target_output_name.kicad_sym, target_output_name.pretty, target_output_name.3dshapes і т.д.
-            target_output_name = f"LCSC_{category}"
             
             plugin_folder = Path(PLUGIN_PATH).resolve().name
             symbols_path = base_path / "symbols" / plugin_folder / target_output_name
@@ -131,15 +143,13 @@ class EasyedaImporter:
             
             for folder in ("symbols", "footprints", "3dmodels"):
                 (base_path / folder / plugin_folder).mkdir(parents=True, exist_ok=True)
-            
-            self.log(
-                f"Режим зберігання: system (спільна тека)\n  Symbols → {symbols_path}\n  Footprints → {footprints_path}\n  3D → {models_3d_path}\n"
-            )
+        
         else:
+            lib_path = self.project_path / project_lib_dir
+            lib_path.mkdir(parents=True, exist_ok=True)
             symbols_path = footprints_path = models_3d_path = (
-                Path(self.project_path) / "library" / target_output_name
+                lib_path / target_output_name
             )
-            self.log(f"Режим зберігання: project (всередині проєкту) → {symbols_path}\n")
         return symbols_path, footprints_path, models_3d_path
 
     def import_part(
@@ -159,7 +169,7 @@ class EasyedaImporter:
         
         ret = 0
         for cmd in commands:
-            self.log("Запуск: " + " ".join(str(x) for x in cmd) + "\n")
+            self.log("Command: " + " ".join(str(x) for x in cmd) + "\n")
             ret = self._run_and_stream(cmd, env=env)
             if ret != 0:
                 break
@@ -197,6 +207,7 @@ class EasyedaImporter:
                     if v is None:
                         continue
                     props[str(k)] = str(v)
+                    
             editor.apply_properties(
                 props,
                 category=category,
@@ -207,7 +218,7 @@ class EasyedaImporter:
             editor.save(strip_ids=True)
 
         except Exception as e:
-            self.log(f"Не вдалося оновити символ: {e}\n")
+            self.log(f"Failed to update symbol: {e}\n")
 
         
         # Cleanup cross-generated artifacts in wrong folders (system mode)
@@ -224,21 +235,27 @@ class EasyedaImporter:
             if footprints_path != models_3d_path:
                 self._safe_remove(Path(f"{footprints_path}.3dshapes"))
                 self._safe_remove(Path(f"{models_3d_path}.pretty"))
+            # Fix absolute model paths in footprints to point to models_3d_path
+            try:
+                fixed = FootprintEditor(self.project_path, log=self.log).rewrite_system_3d_model_paths(
+                    footprints_path, models_3d_path
+                )
+                self.log(f"Fixed system 3D paths in footprints: {fixed}\n")
+            except Exception as e:
+                self.log(f"Failed to fix system 3D paths: {e}\n")
 
         # Update lib tables + relativize 3D (project mode)
         else:
             try:
                 mgr = LibTablesManager(self.project_path, log=self.log)
-                _sym_found, _fp_found, lib_base = mgr.ensure_project_lib_tables(lib_base, use_project_relative=True)
+                _sym_found, _fp_found, lib_base = mgr.ensure_project_lib_tables(symbols_path.parent, use_project_relative=True)
             except Exception as e:
-                self.log(f"Не вдалося оновити library tables: {e}\n")
+                self.log(f"Failed to update library tables: {e}\n")
             try:
-                changes = FootprintEditor(self.project_path).relativize_3d_model_paths(Path(lib_base))
-                self.log(f"Виправлено шляхів до 3D моделей: {changes}\n")
+                changes = FootprintEditor(self.project_path, log=self.log).relativize_3d_model_paths(Path(lib_base))
+                self.log(f"Fixed 3D model paths: {changes}\n")
             except Exception as e:
-                self.log(f"Не вдалося оновити 3D-шляхи: {e}\n")
-        
-        self.log(f"Імпорт завершено у: {symbols_path}, {footprints_path}, {models_3d_path}\n")
+                self.log(f"Failed to update 3D paths: {e}\n")
         return True, lib_base
 
     @property
@@ -276,5 +293,5 @@ class EasyedaImporter:
                     self.log(line)
             return proc.wait()
         except Exception as e:
-            self.log(f"Помилка виконання: {e}\n")
+            self.log(f"Execution error: {e}\n")
             return 1

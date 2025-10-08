@@ -9,14 +9,14 @@ from .helpers import HighResWxSize, loadBitmapScaled
 
 
 class SettingsDialog(wx.Dialog):
-    """Minimal settings dialog: only storage scope option."""
+    """Settings dialog for storage scope and generation options."""
 
     def __init__(self, parent):
         wx.Dialog.__init__(
             self,
             parent,
             id=wx.ID_ANY,
-            title="LCSC plugin settings",
+            title="JLCPCB importer plugin settings",
             pos=wx.DefaultPosition,
             size=HighResWxSize(parent.window, wx.Size(520, 220)),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
@@ -34,7 +34,7 @@ class SettingsDialog(wx.Dialog):
         entries[2].Set(wx.ACCEL_SHIFT, wx.WXK_ESCAPE, quitid)
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
-        # Layout (only storage scope option visible)
+        # Layout (storage scope + generation options)
         layout = wx.BoxSizer(wx.VERTICAL)
         
         # Storage scope (Project vs System)
@@ -71,6 +71,41 @@ class SettingsDialog(wx.Dialog):
         storage_scope_sizer.Add(self.library_scope_box, 100, wx.ALL | wx.EXPAND, 5)
 
         layout.Add(storage_scope_sizer, 0, wx.ALL | wx.EXPAND, 5)
+
+        # Generation options box
+        gen_box = wx.StaticBoxSizer(wx.VERTICAL, self, label="Generated libraries")
+
+        # Library prefix text field (used as base name prefix, e.g. "JLCPCB_")
+        prefix_row = wx.BoxSizer(wx.HORIZONTAL)
+        prefix_row.Add(wx.StaticText(self, label="Library name prefix:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.lib_prefix_ctrl = wx.TextCtrl(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.parent.window, wx.Size(200, -1)),
+            name="general_lib_prefix",
+        )
+        self.lib_prefix_ctrl.SetToolTip(wx.ToolTip("Prefix prepended to generated library names (e.g. JLCPCB_)."))
+        self.lib_prefix_ctrl.Bind(wx.EVT_TEXT, self.update_settings)
+        prefix_row.Add(self.lib_prefix_ctrl, 1, wx.EXPAND)
+        gen_box.Add(prefix_row, 0, wx.ALL | wx.EXPAND, 5)
+
+        # Project directory name where libraries are placed when scope=project
+        projdir_row = wx.BoxSizer(wx.HORIZONTAL)
+        projdir_row.Add(wx.StaticText(self, label="Project library folder:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.project_lib_dir_ctrl = wx.TextCtrl(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.parent.window, wx.Size(200, -1)),
+            name="general_project_lib_dir",
+        )
+        self.project_lib_dir_ctrl.SetToolTip(wx.ToolTip("Folder name under the project to store generated libs (default: library)."))
+        self.project_lib_dir_ctrl.Bind(wx.EVT_TEXT, self.update_settings)
+        projdir_row.Add(self.project_lib_dir_ctrl, 1, wx.EXPAND)
+        gen_box.Add(projdir_row, 0, wx.ALL | wx.EXPAND, 5)
+
+        layout.Add(gen_box, 0, wx.ALL | wx.EXPAND, 5)
         self.SetSizer(layout)
         self.Layout()
         self.Centre(wx.BOTH)
@@ -81,6 +116,12 @@ class SettingsDialog(wx.Dialog):
         # Default to project scope if not set
         self.update_library_scope(
             self.parent.settings.get("general", {}).get("library_scope", "project")
+        )
+        self.update_lib_prefix(
+            self.parent.settings.get("general", {}).get("lib_prefix", "JLCPCB_")
+        )
+        self.update_project_lib_dir(
+            self.parent.settings.get("general", {}).get("project_lib_dir", "library")
         )
 
     def update_settings(self, event):
@@ -125,5 +166,17 @@ class SettingsDialog(wx.Dialog):
             idx = int(scope) if scope in (0, 1) else 0
         try:
             self.library_scope_box.SetSelection(idx)
+        except Exception:
+            pass
+
+    def update_lib_prefix(self, value: str):
+        try:
+            self.lib_prefix_ctrl.ChangeValue(str(value) if value is not None else "")
+        except Exception:
+            pass
+
+    def update_project_lib_dir(self, value: str):
+        try:
+            self.project_lib_dir_ctrl.ChangeValue(str(value) if value is not None else "")
         except Exception:
             pass

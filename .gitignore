@@ -4,3 +4,4 @@ lib/*
 !lib/.gitkeep
 __pycache__/
 *.pyc
+.DS_Store

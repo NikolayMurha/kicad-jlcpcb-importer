@@ -1,21 +1,26 @@
-"""Utilities to edit KiCad .kicad_sym files for a specific symbol."""
+"""Utilities to edit KiCad .kicad_sym files for a specific symbol (regex/text-based)."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 import re
 import wx  # type: ignore
-from .events import LogboxAppendEvent
+
+try:  # optional UI logger event
+    from .events import LogboxAppendEvent  # type: ignore
+except Exception:  # pragma: no cover
+    LogboxAppendEvent = None  # type: ignore
+
 
 class SymbolEditor:
-    """Edit properties of a specific symbol in a .kicad_sym file.
+    """Edit a specific symbol block inside a .kicad_sym via text operations.
 
-    - Loads file lazily and keeps the whole text in memory
+    - Loads/saves the whole file text
     - Locates target (symbol "<symbol_id>") block and edits only that block
-    - Provides helpers to set properties with hidden effects and to patch footprint prefix
-    - Can update Value based on attributes for passive categories
-    - Saves back to file with optional stripping of (id ..) tokens
+    - Updates properties; can add hidden ones; ensures footprint prefix
+    - Always updates Value for passives from primary attribute
+    - For any symbol with <=2 pins: make pins `(pin passive line ...)` and name `~`; hide pin numbers
     """
 
     def __init__(self, sym_path: Path | str, symbol_id: str, parent_window: Optional[wx.Window] = None):
@@ -25,6 +30,15 @@ class SymbolEditor:
         self._text: str = ""
         self._block_span: Optional[Tuple[int, int]] = None
         self._block: str = ""
+
+    def _log(self, msg: str) -> None:
+        try:
+            if self.parent_window is not None and LogboxAppendEvent is not None:
+                wx.PostEvent(self.parent_window, LogboxAppendEvent(msg=f"[SymbolEditor] {msg}\n"))
+            else:
+                print(f"[SymbolEditor] {msg}")
+        except Exception:
+            pass
 
     # ---------- low-level helpers ----------
     def _load(self) -> None:
@@ -57,40 +71,24 @@ class SymbolEditor:
             idx = end if end != -1 else start + 7
         return blocks
 
-    @staticmethod
-    def _find_pin_blocks(src: str) -> List[Tuple[int, int]]:
-        """Return spans (start, end) for each top-level (pin ...) block in src.
-
-        Uses balanced parentheses scanning starting from each "(pin " occurrence.
-        Spans are relative to the provided src string.
-        """
-        pins: List[Tuple[int, int]] = []
-        idx = 0
-        n = len(src)
-        while True:
-            start = src.find("(pin ", idx)
-            if start == -1:
+    def _ensure_loaded_block(self) -> None:
+        self._load()
+        if self._block_span is not None:
+            return
+        blocks = self._find_blocks(self._text)
+        for (s, e) in blocks:
+            head = self._text[s : min(e, s + 200)]
+            if re.search(rf"\(symbol\s+\"{re.escape(self.symbol_id)}\"", head):
+                self._block_span = (s, e)
+                self._block = self._text[s:e]
                 break
-            depth = 0
-            i = start
-            end = -1
-            while i < n:
-                c = src[i]
-                if c == "(":
-                    depth += 1
-                elif c == ")":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-                i += 1
-            if end != -1:
-                pins.append((start, end))
-                idx = end
+        if self._block_span is None:
+            if len(blocks) == 1:
+                self._block_span = blocks[0]
+                s, e = blocks[0]
+                self._block = self._text[s:e]
             else:
-                # Fallback to avoid infinite loop on malformed content
-                idx = start + 1
-        return pins
+                raise ValueError("Symbol block not found in file")
 
     @staticmethod
     def _prop_exists(block: str, name: str) -> bool:
@@ -120,7 +118,7 @@ class SymbolEditor:
 
     @staticmethod
     def _extract_template(block: str) -> Tuple[str, str, str]:
-        # Try Footprint first, then Value
+        # Try Footprint first, then Value, else a minimal property
         m = re.search(r"\(property\s*\"Footprint\"[\s\S]*?\)", block)
         if not m:
             m = re.search(r"\(property\s*\"Value\"[\s\S]*?\)", block)
@@ -146,36 +144,68 @@ class SymbolEditor:
             return effects + " (hide yes)"
         return effects[:idx] + " (hide yes)" + effects[idx:]
 
-    def _ensure_loaded_block(self) -> None:
-        self._load()
-        if self._block_span is not None:
-            return
-        # Locate the symbol block with matching ID
-        blocks = self._find_blocks(self._text)
-        for (s, e) in blocks:
-            head = self._text[s : min(e, s + 200)]
-            if re.search(rf"\(symbol\s+\"{re.escape(self.symbol_id)}\"", head):
-                self._block_span = (s, e)
-                self._block = self._text[s:e]
+    @staticmethod
+    def _find_pin_blocks(block: str) -> List[Tuple[int, int]]:
+        pins: List[Tuple[int, int]] = []
+        idx = 0
+        n = len(block)
+        while True:
+            start = block.find("(pin ", idx)
+            if start == -1:
                 break
-        if self._block_span is None:
-            # As a fallback, if file has only one block, edit it
-            if len(blocks) == 1:
-                self._block_span = blocks[0]
-                s, e = blocks[0]
-                self._block = self._text[s:e]
+            depth = 0
+            i = start
+            end = -1
+            while i < n:
+                c = block[i]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+                i += 1
+            if end != -1:
+                pins.append((start, end))
+                idx = end
             else:
-                raise ValueError("Symbol block not found in file")
+                idx = start + 1
+        return pins
+
+    @staticmethod
+    def _has_pin_numbers_hide_yes(block: str) -> bool:
+        return re.search(r"\(pin_numbers\b[\s\S]*?\(hide\s+yes\)\s*\)", block) is not None
+
+    def _ensure_pin_numbers_hidden(self) -> int:
+        """Ensure `(pin_numbers (hide yes))` exists (or is normalized) in current symbol block.
+
+        Returns 1 if modified, else 0.
+        """
+        # Already correct
+        if self._has_pin_numbers_hide_yes(self._block):
+            return 0
+        # Normalize existing pin_numbers token
+        m = re.search(r"(?m)^(\s*)\(pin_numbers\b[\s\S]*?\)$", self._block)
+        if m:
+            indent = m.group(1)
+            normalized = f"{indent}(pin_numbers (hide yes))"
+            new_block = re.sub(r"(?m)^(\s*)\(pin_numbers\b[\s\S]*?\)$", normalized, self._block, count=1)
+            if new_block != self._block:
+                self._block = new_block
+                return 1
+            return 0
+        # Insert a new pin_numbers token before the last ')'
+        indent, _at, _eff = self._extract_template(self._block)
+        line = f"{indent}(pin_numbers (hide yes))\n"
+        insert_at = self._block.rfind(')')
+        if insert_at != -1:
+            self._block = self._block[:insert_at] + line + self._block[insert_at:]
+            return 1
+        return 0
 
     # ---------- public API ----------
     def ensure_footprint_prefix(self, prefix: str) -> int:
-        """Ensure Footprint property is prefixed with self.prefix.
-
-        - If the Footprint value already starts with the prefix, leave as-is.
-        - Otherwise, add prefix when the library name starts with "LCSC_".
-          (Category is not strictly required for the change.)
-        Returns number of updates (0/1).
-        """
         self._ensure_loaded_block()
         pattern = re.compile(r"\(property\s*(?:\n\s*)?\"Footprint\"\s*(?:\n\s*)?\"([^\"]+)\"", re.MULTILINE)
         updates = 0
@@ -183,13 +213,11 @@ class SymbolEditor:
         def repl(m):
             nonlocal updates
             val = m.group(1)
-            # Already prefixed
-            if val.startswith(f"{prefix}"):
+            if val.startswith(prefix):
                 return m.group(0)
-
             updates += 1
             return m.group(0).replace(f'"{val}"', f'"{prefix}{val}"', 1)
-            
+
         new_block, _ = pattern.subn(repl, self._block)
         if new_block != self._block:
             self._block = new_block
@@ -203,35 +231,22 @@ class SymbolEditor:
         hidden: bool = True,
         exclude_equal_to_value: bool = True,
     ) -> int:
-        """Apply properties to the symbol block and optionally update Value.
-
-        - Treats all entries of `properties` as symbol properties to add/update
-        - If `category` is provided, sets Value from primary attribute
-          (Resistance/Capacitance/Inductance/Impedance) when appropriate
-        - update_empty_only: existing non-empty properties left unchanged
-        - hidden: added properties include (effects ... (hide yes))
-        - exclude_equal_to_value: skip props whose value equals current Value
-        Returns number of changes (including a possible Value change).
-        """
         self._ensure_loaded_block()
         changes = 0
         current_value = (self._get_prop_value(self._block, "Value") or "").strip()
 
-        for name, val in properties.items():
+        for name, val in (properties or {}).items():
             if val is None:
                 continue
-            # Avoid trying to set Footprint/Value through generic path
             if name.strip() in ("Footprint", "Value"):
                 continue
-            
             sval = str(val)
             if exclude_equal_to_value and sval.strip() == current_value:
                 continue
-            
             if self._prop_exists(self._block, name):
                 if update_empty_only:
-                    current = self._get_prop_value(self._block, name) or ""
-                    if current.strip() == "":
+                    cur = self._get_prop_value(self._block, name) or ""
+                    if cur.strip() == "":
                         self._block, modified = self._set_prop_value(self._block, name, sval)
                         if modified:
                             changes += 1
@@ -245,76 +260,43 @@ class SymbolEditor:
                 if insert_at != -1:
                     self._block = self._block[:insert_at] + new_line + self._block[insert_at:]
                     changes += 1
-        # Optionally update Value from primary attributes present in `properties`
+
         if category:
             cat = (category or "").lower()
             primary: Optional[str] = None
             if "resistor" in cat:
-                primary = properties.get("Resistance")
+                primary = (properties or {}).get("Resistance")
             elif "capacitor" in cat:
-                primary = properties.get("Capacitance")
+                primary = (properties or {}).get("Capacitance")
             elif "inductor" in cat or "coil" in cat:
-                primary = properties.get("Inductance")
+                primary = (properties or {}).get("Inductance")
             elif "ferrite" in cat or "bead" in cat:
-                primary = properties.get("Impedance @ Frequency") or properties.get("Impedance")
-                
+                primary = (properties or {}).get("Impedance @ Frequency") or (properties or {}).get("Impedance")
             if primary:
-                current_value = self._get_prop_value(self._block, "Value") or ""
-                mfr_part_prop = (properties.get("Manufacturer Part") or properties.get("MFR.Part") or "").strip()
-                if (current_value.strip() == "") or (mfr_part_prop and current_value.strip() == mfr_part_prop):
+                curv = self._get_prop_value(self._block, "Value") or ""
+                if curv != primary:
                     self._block, modified = self._set_prop_value(self._block, "Value", primary)
                     if modified:
                         changes += 1
 
-            # If the category is one of the passives above, and symbol has <= 2 pins,
-            # normalize pins to "input line" and set pin names to "~".
-            if any(k in cat for k in ("resistor", "capacitor", "inductor", "coil", "ferrite", "bead")):
-                pin_changes = self._normalize_two_or_fewer_pins_to_input_with_tilde()
-                changes += pin_changes
-        return changes
-
-    # ---------- pin normalization helpers ----------
-    def _normalize_two_or_fewer_pins_to_input_with_tilde(self) -> int:
-        """If the symbol has <= 2 pins, make each pin "input line" and name "~".
-
-        - Keeps existing pin position, length, number and effects intact
-        - Only updates the pin header tokens and the (name "...") value
-        Returns number of pin edits performed.
-        """
+        # Normalize any two-pin symbol: passive/line, name '~', hide numbers
         pins = self._find_pin_blocks(self._block)
-        if not pins or len(pins) > 2:
-            return 0
-
-        # Build a new block by replacing each pin block in order
-        new_parts: List[str] = []
-        prev = 0
-        edits = 0
-
-        # Regex that matches the pin header allowing line breaks between tokens
-        header_re = re.compile(r'^\(pin(?:\s+|\s*\n\s*)\S+(?:\s+|\s*\n\s*)\S+', re.MULTILINE)
-        # Regex to force pin name to "~"
-        name_re = re.compile(r'(\(name(?:\s+|\s*\n\s*)")(.*?)(")', re.MULTILINE)
-
-        for (s, e) in pins:
-            new_parts.append(self._block[prev:s])
-            pin_text = self._block[s:e]
-
-            updated = pin_text
-            # Replace header to "(pin input line"
-            updated2, n1 = header_re.subn("(pin input line", updated, count=1)
-            # Replace pin name to "~"
-            updated3, n2 = name_re.subn(r'\1~\3', updated2, count=1)
-
-            if updated3 != pin_text:
-                edits += (1 if n1 else 0) + (1 if n2 else 0)
-            new_parts.append(updated3)
-            prev = e
-
-        new_parts.append(self._block[prev:])
-        new_block = "".join(new_parts)
-        if new_block != self._block:
-            self._block = new_block
-        return edits
+        if pins and (len(pins) <= 2 or (len(pins) == 3 and "diodes" in cat)): 
+            new_parts: List[str] = []
+            prev = 0
+            header_re = re.compile(r'^\(pin(?:\s+|\s*\n\s*)\S+(?:\s+|\s*\n\s*)\S+', re.MULTILINE)
+            name_re = re.compile(r'(\(name(?:\s+|\s*\n\s*)")(.*?)(")', re.MULTILINE)
+            for (s, e) in pins:
+                new_parts.append(self._block[prev:s])
+                pin_text = self._block[s:e]
+                pin_text = header_re.sub("(pin passive line", pin_text, count=1)
+                pin_text = name_re.sub(r'\1~\3', pin_text, count=1)
+                new_parts.append(pin_text)
+                prev = e
+            new_parts.append(self._block[prev:])
+            self._block = "".join(new_parts)
+            changes += self._ensure_pin_numbers_hidden()
+        return changes
 
     def update_value_from_attributes(
         self,
@@ -322,25 +304,42 @@ class SymbolEditor:
         attrs: Optional[Dict[str, str]],
         mfr_part: Optional[str] = None,
     ) -> bool:
-        """Backward-compatible wrapper that delegates to apply_properties.
-
-        mfr_part is merged into properties under "Manufacturer Part" for compatibility.
-        """
         props = dict(attrs or {})
         if mfr_part:
             props.setdefault("Manufacturer Part", mfr_part)
         return bool(self.apply_properties(props, category=category))
 
     def save(self, strip_ids: bool = True) -> None:
-        """Persist changes back to the file."""
         if self._block_span is None:
             return
+        # Ensure '(symbol ...' and closing ')' lines start with exactly two spaces
+        try:
+            lines = self._block.splitlines(True)
+            if lines:
+                # First line: '(symbol ...' → force two-space indent
+                lines[0] = re.sub(r"^\s*", "  ", lines[0])
+                # Last non-empty line: ')' → force two-space indent
+                # Find index of last line that contains only optional whitespace and a ')'
+                last_idx = len(lines) - 1
+                # Trim trailing empty lines
+                while last_idx >= 0 and lines[last_idx].strip() == "":
+                    last_idx -= 1
+                if last_idx >= 0:
+                    lines[last_idx] = re.sub(r"^\s*\)\s*$", "  )" + ("\n" if not lines[last_idx].endswith("\n") else ""), lines[last_idx])
+                self._block = "".join(lines)
+        except Exception:
+            pass
         s, e = self._block_span
         new_text = self._text[:s] + self._block + self._text[e:]
         if strip_ids:
-            new_text = re.sub(r"\(id\s+\d+\)", "", new_text)
+            new_text = re.sub(r"\(id\s+[^\)]+\)", "", new_text)
+        try:
+            def _tabs_to_spaces(m):
+                return " " * (2 * len(m.group(0)))
+            new_text = re.sub(r"(?m)^(\t+)", _tabs_to_spaces, new_text)
+        except Exception:
+            pass
         if new_text != self._text:
             self.sym_path.write_text(new_text, encoding="utf-8")
         self._text = new_text
-        # Update span end in case sizes changed
         self._block_span = (s, s + len(self._block))
