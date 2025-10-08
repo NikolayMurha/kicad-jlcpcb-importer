@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD013 -->
 
 Thanks and credit to the original project that inspired this work:
-[Bouni/kicad-jlcpcb-importer](https://github.com/Bouni/kicad-jlcpcb-importer)
+[Bouni/bouni-kicad-repository](https://github.com/Bouni/bouni-kicad-repository)
 
 - Tested with KiCad 9
 
@@ -86,8 +86,6 @@ In order to get it working you can run the following 3 commands:
 1. `flatpak run --command=sh org.kicad.KiCad`
 2. `python -m ensurepip --upgrade`
 3. `/var/data/python/bin/pip3 install requests`
-
-See [issue #94](https://github.com/Bouni/kicad-jlcpcb-importer/issues/94) for more info.
 
 ## Usage 🥳
 
@@ -205,7 +203,7 @@ The `{kicad-jlcpcb-importer folder name}` should be the name of the kicad-jlcpcb
 
 - For Kicad managed plugins this may be like
 
-> com_github_bouni_kicad-jlcpcb-importer
+> com_github_nikolaymurha_kicad-jlcpcb-importer
 
 - If you are developing kicad-jlcpcb-importer this is the folder you cloned the kicad-jlcpcb-importer as.
 
