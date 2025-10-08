@@ -13,6 +13,7 @@ from .events import AssignPartsEvent, UpdateSetting
 from .helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor
 from .partdetails import PartDetailsDialog
 from .lcsc_api import LCSC_API
+from .library import LibraryState
 
 class PartSelectorDialog(wx.Dialog):
     """The part selector window."""
@@ -155,7 +156,7 @@ class PartSelectorDialog(wx.Dialog):
             "",
             wx.DefaultPosition,
             HighResWxSize(getattr(self.parent, "window", self), wx.Size(200, 24)),
-            choices=(self.library or getattr(self.parent, "library", None)).categories if (self.library or getattr(self.parent, "library", None)) else [],
+            choices=self._initial_categories(),
             style=wx.CB_READONLY,
         )
         self.category.SetHint("e.g. Resistors")
@@ -680,7 +681,55 @@ class PartSelectorDialog(wx.Dialog):
         self.enable_toolbar_buttons(False)
 
         # initiate the initial search now that the window has been constructed
-        self.search(None)
+        ready = False
+        try:
+            lib = (self.library or getattr(self.parent, "library", None))
+            ready = bool(lib and getattr(lib, "state", None) == LibraryState.INITIALIZED)
+        except Exception:
+            ready = False
+        self.set_db_ready(ready)
+        if ready:
+            self.search(None)
+
+    # -------------------- DB readiness helpers --------------------
+    def _initial_categories(self):
+        lib = (self.library or getattr(self.parent, "library", None))
+        if not lib:
+            return []
+        try:
+            return lib.categories
+        except Exception:
+            return []
+
+    def set_db_ready(self, ready: bool):
+        try:
+            self.search_button.Enable(bool(ready))
+            self.keyword.Enable(bool(ready))
+            self.manufacturer.Enable(bool(ready))
+            self.package.Enable(bool(ready))
+            self.category.Enable(bool(ready))
+            self.subcategory.Enable(bool(ready))
+            self.part_no.Enable(bool(ready))
+            self.solder_joints.Enable(bool(ready))
+        except Exception:
+            pass
+
+        if ready:
+            self.refresh_categories()
+
+    def refresh_categories(self):
+        try:
+            cats = self._initial_categories()
+            self.category.Clear()
+            if cats:
+                self.category.AppendItems(cats)
+                try:
+                    self.category.SetSelection(0)
+                except Exception:
+                    pass
+                self.update_subcategories()
+        except Exception:
+            pass
 
     def update_settings(self, event):
         """Update the settings on change."""

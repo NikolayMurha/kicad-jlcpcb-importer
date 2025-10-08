@@ -28,7 +28,7 @@ from .events import (
     LogboxAppendEvent,
     MessageEvent,
 )
-from .library import Library
+from .library import Library, LibraryState
 from .easyeda_importer import EasyedaImporter
 
 import pcbnew as kicad_pcbnew  # pylint: disable=import-error
@@ -140,6 +140,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.Bind(EVT_DOWNLOAD_STARTED_EVENT, self._on_progress_reset)
         self.Bind(EVT_DOWNLOAD_PROGRESS_EVENT, self._on_progress_update)
         self.Bind(EVT_DOWNLOAD_COMPLETED_EVENT, self._on_progress_reset)
+        self.Bind(EVT_DOWNLOAD_COMPLETED_EVENT, self._on_db_download_completed)
         self.Bind(EVT_UNZIP_COMBINING_STARTED_EVENT, self._on_progress_reset)
         self.Bind(EVT_UNZIP_COMBINING_PROGRESS_EVENT, self._on_progress_update)
         self.Bind(EVT_UNZIP_EXTRACTING_STARTED_EVENT, self._on_progress_reset)
@@ -166,6 +167,18 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self._check_and_offer_install_deps()
         # Ensure UI matches current deps state
         self._update_select_enabled()
+
+        # Trigger initial DB download if missing and disable search UI until ready
+        try:
+            if getattr(self.library, "state", None) == LibraryState.UPDATE_NEEDED:
+                self.log("Parts database not found. Starting initial download...\n")
+                try:
+                    self.set_db_ready(False)
+                except Exception:
+                    pass
+                self.library.update()
+        except Exception:
+            pass
 
     def _resolve_python_exe(self) -> str:
         try:
@@ -459,7 +472,23 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     # Expose update for button
     def update_library(self):
-        self.library.update()
+        try:
+            if getattr(self.library, "state", None) == LibraryState.DOWNLOAD_RUNNING:
+                return
+            if hasattr(self, "update_db_btn") and self.update_db_btn:
+                self.update_db_btn.Enable(False)
+            try:
+                self.set_db_ready(False)
+            except Exception:
+                pass
+            self.library.update()
+        except Exception:
+            try:
+                if hasattr(self, "update_db_btn") and self.update_db_btn:
+                    self.update_db_btn.Enable(True)
+            except Exception:
+                pass
+            raise
 
     # Local handlers
     def _append_log(self, e):
@@ -507,6 +536,48 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             except Exception:
                 val = 0
             self.gauge.SetValue(max(0, min(100, val)))
+
+    def _on_download_started(self, *_):
+        try:
+            if hasattr(self, "update_db_btn") and self.update_db_btn:
+                self.update_db_btn.Enable(False)
+            try:
+                self.set_db_ready(False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _on_download_completed(self, *_):
+        try:
+            if hasattr(self, "update_db_btn") and self.update_db_btn:
+                self.update_db_btn.Enable(True)
+            if getattr(self, "library", None) and getattr(self.library, "state", None) == LibraryState.INITIALIZED:
+                try:
+                    self.refresh_categories()
+                except Exception:
+                    pass
+                try:
+                    self.set_db_ready(True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_db_download_completed(self, *_):
+        """Enable search and refresh categories when DB is ready."""
+        try:
+            if getattr(self.library, "state", None) == LibraryState.INITIALIZED:
+                try:
+                    self.refresh_categories()
+                except Exception:
+                    pass
+                try:
+                    self.set_db_ready(True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # Logging setup similar to legacy mainwindow to capture logs in UI
     def _init_logger(self):
