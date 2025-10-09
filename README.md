@@ -15,6 +15,12 @@ What it does
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
 - Configurable library prefix (default: `LCSC_`) and project library folder (default: `library`)
 
+## Limitations
+
+- KiCad 9 currently does not provide a Python API to force refresh or reload library tables (symbols/footprints) at runtime.
+- After importing a component (and updating `sym-lib-table` / `fp-lib-table` on disk), restart KiCad or reopen the project to see newly added libraries in browsers and pickers.
+- In System storage mode, KiCad auto‑scans configured 3rd‑party folders and applies your configured nickname prefix, but visibility in the current session may still require a restart.
+
 Screenshots
 
 - Search: `images/search.png`

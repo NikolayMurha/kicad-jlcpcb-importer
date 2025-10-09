@@ -43,13 +43,15 @@ class EasyedaImporter:
         try:
             try:
                 import pcbnew as _kicad_pcbnew  # type: ignore
-            except Exception:
+            except Exception as e:
+                self.log(f"resolve_nickname_prefix: pcbnew import failed: {e}\n")
                 _kicad_pcbnew = None
             base = None
             if _kicad_pcbnew is not None:
                 try:
                     base = _kicad_pcbnew.SETTINGS_MANAGER.GetUserSettingsPath()
-                except Exception:
+                except Exception as e:
+                    self.log(f"resolve_nickname_prefix: cannot get user settings path: {e}\n")
                     base = None
             if base:
                 settings_path = Path(base) / "kicad.json"
@@ -61,10 +63,10 @@ class EasyedaImporter:
                             prefix = pcm.get("lib_prefix")
                             if isinstance(prefix, str) and prefix.strip():
                                 return prefix.strip()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        self.log(f"resolve_nickname_prefix: failed to parse kicad.json: {e}\n")
+        except Exception as e:
+            self.log(f"resolve_nickname_prefix: unexpected error: {e}\n")
 
         return "PCM_"
 
@@ -78,8 +80,11 @@ class EasyedaImporter:
             if path.exists() and path.is_file():
                 path.unlink()
                 return 1
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                print(f"safe_remove failed for {path}: {e}")
+            except Exception:
+                ...
         return 0
 
     def _build_commands(self, lcsc_id: str, sym_out: Path, fp_out: Path, m3d_out: Path) -> list[list[str]]:
@@ -113,7 +118,7 @@ class EasyedaImporter:
             ]
         ]
 
-    def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, Path, bool]:
+    def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path]:
 
         # Resolve generation settings from parent (with defaults)
         try:
@@ -160,6 +165,7 @@ class EasyedaImporter:
     ) -> Tuple[bool, Path]:
         category = self._sanitize(category or "Misc")
         symbols_path, footprints_path, models_3d_path = self._compute_outputs(category)
+        lib_base = symbols_path.parent
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.lib_dir) + (
             (os.pathsep + env.get("PYTHONPATH", "")) if env.get("PYTHONPATH") else ""
@@ -175,7 +181,7 @@ class EasyedaImporter:
                 break
             
         if ret != 0:
-            return False
+            return False, lib_base
 
         # Patch symbol and properties
         try:
@@ -199,7 +205,8 @@ class EasyedaImporter:
             
             try:
                 attrs = json.loads(attrs_json) if attrs_json else {}
-            except Exception:
+            except Exception as e:
+                self.log(f"Attributes JSON parse error: {e}\n")
                 attrs = {}
             
             if isinstance(attrs, dict):
@@ -243,12 +250,16 @@ class EasyedaImporter:
                 self.log(f"Fixed system 3D paths in footprints: {fixed}\n")
             except Exception as e:
                 self.log(f"Failed to fix system 3D paths: {e}\n")
+            # Resolve generated .pretty base for info only (no runtime registration in KiCad 9)
+            lib_base = footprints_path.with_suffix(".pretty")
+            self.log("KiCad 9 cannot reload libraries via Python. New libraries will appear after restart.\n")
 
         # Update lib tables + relativize 3D (project mode)
         else:
+            fp_found = []
             try:
                 mgr = LibTablesManager(self.project_path, log=self.log)
-                _sym_found, _fp_found, lib_base = mgr.ensure_project_lib_tables(symbols_path.parent, use_project_relative=True)
+                _sym_found, fp_found, lib_base = mgr.ensure_project_lib_tables(symbols_path.parent, use_project_relative=True)
             except Exception as e:
                 self.log(f"Failed to update library tables: {e}\n")
             try:
@@ -256,6 +267,8 @@ class EasyedaImporter:
                 self.log(f"Fixed 3D model paths: {changes}\n")
             except Exception as e:
                 self.log(f"Failed to update 3D paths: {e}\n")
+            # No runtime registration in KiCad 9; advise restart/reopen
+            self.log("KiCad 9 cannot reload libraries via Python. Please reopen the project or restart KiCad.\n")
         return True, lib_base
 
     @property
@@ -275,8 +288,12 @@ class EasyedaImporter:
         try:
             if self.parent_window is not None:
                 wx.PostEvent(self.parent_window, LogboxAppendEvent(msg=msg))
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                print(f"UI log dispatch failed: {e}. Message: {msg}")
+            except Exception:
+                # Last resort: swallow
+                ...
 
     def _run_and_stream(self, cmd, env=None) -> int:
         try:
