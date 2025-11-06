@@ -3,9 +3,16 @@
 import logging
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import wx  # pylint: disable=import-error
 import wx.dataview as dv  # pylint: disable=import-error
+try:
+    from PIL import Image, ImageOps  # pylint: disable=import-error
+except Exception:  # Pillow is declared in requirements.txt
+    Image = None
+    ImageOps = None
 
 from .datamodel import PartSelectorDataModel
 from .derive_params import params_for_part  # pylint: disable=import-error
@@ -53,6 +60,18 @@ class PartSelectorDialog(wx.Dialog):
         self._pageurl = ""
         lcsc_selection = self.get_existing_selection(parts)
 
+        # ------------------------- UI tuning constants ------------------------
+        # Row height multiplier (2.0-3.0 recommended)
+        self.ROW_HEIGHT_MULTIPLIER = 2.5
+        # Explicit thumbnail height in pixels (None = auto via multiplier)
+        self.THUMB_HEIGHT_PX = 60
+        # Parallel thumbnail downloads
+        self.THUMB_MAX_WORKERS = 4
+        # Prefetch rows ahead of viewport
+        self.THUMB_PREFETCH_ROWS = 0
+        # Base pixel size for 1x scale
+        self._base_row_px = 24
+
         self._debounce_ms = 600  # pause between typing and search (ms)
         self.search_timer = wx.Timer(self)
         # Bind specifically to this timer to avoid handling other timers
@@ -97,29 +116,42 @@ class PartSelectorDialog(wx.Dialog):
             wx.ID_ANY,
             "Ω",
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(20, -1)),
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 24)),
             0,
         )
         self.ohm_button.SetToolTip("Insert Ω at cursor in the search field")
+        try:
+            f = self.ohm_button.GetFont()
+            f.SetPointSize(max(12, f.GetPointSize() + 2))
+            self.ohm_button.SetFont(f)
+        except Exception:
+            pass
 
         self.micro_button = wx.Button(
             self,
             wx.ID_ANY,
             "µ",
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(20, -1)),
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 24)),
             0,
         )
         self.micro_button.SetToolTip("Insert µ at cursor in the search field")
-
+        try:
+            f2 = self.micro_button.GetFont()
+            f2.SetPointSize(max(12, f2.GetPointSize() + 4))
+            self.micro_button.SetFont(f2)
+        except Exception:
+            pass
+        self.advanced_panel = wx.Panel(self)
+        
         manufacturer_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Manufacturer",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.manufacturer = wx.TextCtrl(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -129,13 +161,13 @@ class PartSelectorDialog(wx.Dialog):
         self.manufacturer.SetHint("e.g. Vishay")
 
         package_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Package",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.package = wx.TextCtrl(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -145,13 +177,13 @@ class PartSelectorDialog(wx.Dialog):
         self.package.SetHint("e.g. 0603")
 
         category_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Category",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.category = wx.ComboBox(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -162,13 +194,13 @@ class PartSelectorDialog(wx.Dialog):
         self.category.SetHint("e.g. Resistors")
 
         part_no_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Part number",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.part_no = wx.TextCtrl(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -178,13 +210,13 @@ class PartSelectorDialog(wx.Dialog):
         self.part_no.SetHint("e.g. DS2411")
 
         solder_joints_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Solder joints",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.solder_joints = wx.TextCtrl(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -194,13 +226,13 @@ class PartSelectorDialog(wx.Dialog):
         self.solder_joints.SetHint("e.g. 2")
 
         subcategory_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Subcategory",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.subcategory = wx.ComboBox(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "",
             wx.DefaultPosition,
@@ -210,13 +242,13 @@ class PartSelectorDialog(wx.Dialog):
         self.subcategory.SetHint("e.g. Variable Resistors")
 
         basic_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Include basic parts",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.basic_checkbox = wx.CheckBox(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Basic",
             wx.DefaultPosition,
@@ -225,13 +257,13 @@ class PartSelectorDialog(wx.Dialog):
             name="basic",
         )
         extended_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Include extended parts",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.extended_checkbox = wx.CheckBox(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Extended",
             wx.DefaultPosition,
@@ -240,13 +272,13 @@ class PartSelectorDialog(wx.Dialog):
             name="extended",
         )
         stock_label = wx.StaticText(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Only show parts in stock",
             size=HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 15)),
         )
         self.assert_stock_checkbox = wx.CheckBox(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "in Stock",
             wx.DefaultPosition,
@@ -270,7 +302,7 @@ class PartSelectorDialog(wx.Dialog):
         self.assert_stock_checkbox.Bind(wx.EVT_CHECKBOX, self.update_settings)
 
         help_button = wx.Button(
-            self,
+            self.advanced_panel,
             wx.ID_ANY,
             "Help",
             wx.DefaultPosition,
@@ -278,7 +310,17 @@ class PartSelectorDialog(wx.Dialog):
             0,
         )
 
+        self._advanced_visible = False
+        self.advanced_toggle_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            wx.DefaultPosition,
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 24)),
+            0,
+        )
         keyword_search_row1 = wx.BoxSizer(wx.HORIZONTAL)
+        keyword_search_row1.Add(self.advanced_toggle_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.ALIGN_CENTER_VERTICAL, 5)
         keyword_search_row1.Add(keyword_label, 0, wx.ALL, 5)
         # Let the keyword field take remaining horizontal space and keep
         # the buttons at their natural size on the right.
@@ -311,7 +353,26 @@ class PartSelectorDialog(wx.Dialog):
         )
         self.search_button.SetBitmap(loadBitmapScaled("mdi-magnify.png", self.scale_factor))
         self.search_button.SetBitmapMargins((2, 0))
-        keyword_search_row1.Add(self.search_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        keyword_search_row1.Add(self.search_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.ALIGN_CENTER_VERTICAL, 5)
+
+        # Advanced toggle button (to the right of Search)
+      
+        try:
+            self.advanced_toggle_button.SetBitmap(
+                loadBitmapScaled("mdi-chevron-down.png", self.scale_factor)
+            )
+            self.advanced_toggle_button.SetBitmapMargins((0, 2))
+            self.advanced_toggle_button.SetToolTip("Show advanced filters")
+        except Exception:
+            pass
+        # keyword_search_row1.Add(self.advanced_toggle_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.ALIGN_CENTER_VERTICAL, 5)
+        # Match advanced toggle height to Search button height while keeping 24px width
+        try:
+            sh = self.search_button.GetSize().GetHeight()
+            self.advanced_toggle_button.SetMinSize(wx.Size(36, sh))
+            self.advanced_toggle_button.SetSize(wx.Size(36, sh))
+        except Exception:
+            pass
 
         search_sizer_one = wx.BoxSizer(wx.VERTICAL)
         search_sizer_one.Add(manufacturer_label, 0, wx.ALL, 5)
@@ -404,15 +465,23 @@ class PartSelectorDialog(wx.Dialog):
         # Make both rows expand to the full width of the StaticBox
         search_sizer.Add(keyword_search_row1, 0, wx.EXPAND)
 
-        search_sizer_row2 = wx.StaticBoxSizer(wx.HORIZONTAL, self)
+        # Create StaticBoxSizer for advanced panel to ensure proper parenting
+        adv_box = wx.StaticBox(self.advanced_panel, wx.ID_ANY, "")
+        search_sizer_row2 = wx.StaticBoxSizer(adv_box, wx.HORIZONTAL)
         search_sizer_row2.Add(search_sizer_one, 0, wx.RIGHT, 20)
         search_sizer_row2.Add(search_sizer_two, 0, wx.RIGHT, 20)
         search_sizer_row2.Add(search_sizer_three, 0, wx.RIGHT, 20)
         search_sizer_row2.Add(search_sizer_four, 0, wx.RIGHT, 20)
         search_sizer_row2.Add(search_sizer_five, 0, wx.RIGHT, 20)
-        # search_sizer.Add(help_button, 0, wx.RIGHT, 20)
 
-        search_sizer.Add(search_sizer_row2, 0, wx.EXPAND)
+        # Wrap advanced row into a panel to toggle visibility as a block
+        self.advanced_panel.SetSizer(search_sizer_row2)
+        search_sizer.Add(self.advanced_panel, 0, wx.EXPAND)
+        # Start hidden by default
+        try:
+            self.advanced_panel.Show(False)
+        except Exception:
+            pass
 
         # Remove automatic search on typing; bind Enter to perform search
         self.keyword.Bind(wx.EVT_TEXT_ENTER, self.search)
@@ -426,10 +495,116 @@ class PartSelectorDialog(wx.Dialog):
         self.solder_joints.Bind(wx.EVT_TEXT_ENTER, self.search)
         self.search_button.Bind(wx.EVT_BUTTON, self.search)
         help_button.Bind(wx.EVT_BUTTON, self.help)
-
+        self.advanced_toggle_button.Bind(wx.EVT_BUTTON, self._toggle_advanced)
+       
         # Enable type-ahead selection for read-only ComboBoxes (category/subcategory)
         # self._category_typeahead = _ComboTypeAhead(self.category)
         # self._subcategory_typeahead = _ComboTypeAhead(self.subcategory)
+
+        # ---------------------------------------------------------------------
+        # ------------------------- Result Part list --------------------------
+        # ---------------------------------------------------------------------
+
+        table_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        # Restore ScrolledWindow wrapper around the DataViewCtrl
+        table_scroller = wx.ScrolledWindow(self, style=wx.HSCROLL | wx.VSCROLL)
+        table_scroller.SetScrollRate(20, 20)
+        self.table_scroller = table_scroller
+
+        self.part_list = dv.DataViewCtrl(
+            table_scroller,
+            style=wx.BORDER_THEME | dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE,
+        )
+    
+        # First column: thumbnail image
+        self._thumb_px = int((self.THUMB_HEIGHT_PX or (self._base_row_px * self.ROW_HEIGHT_MULTIPLIER * self.scale_factor)))
+        # Some wx versions support per-row height; set if available
+        try:
+            if hasattr(self.part_list, "SetRowHeight"):
+                self.part_list.SetRowHeight(max(24, self._thumb_px + 2))
+        except Exception:
+            self.logger.exception("SetRowHeight failed")
+
+        thumb_col = self.part_list.AppendBitmapColumn(
+            "",
+            0,
+            width=int(self._thumb_px + 8),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_CENTER,
+        )
+        thumb_col.SetSortable(False)
+
+        lcsc = self.part_list.AppendTextColumn(
+            "LCSC",
+            1,
+            width=int(self.scale_factor * 60),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_CENTER,
+        )
+        mfr_number = self.part_list.AppendTextColumn(
+            "MFR Number",
+            2,
+            width=int(self.scale_factor * 140),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
+        package = self.part_list.AppendTextColumn(
+            "Package",
+            3,
+            width=int(self.scale_factor * 100),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
+        pins = self.part_list.AppendTextColumn(
+            "Pins",
+            4,
+            width=int(self.scale_factor * 40),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_CENTER,
+        )
+        parttype = self.part_list.AppendTextColumn(
+            "Type",
+            5,
+            width=int(self.scale_factor * 50),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
+        params = self.part_list.AppendTextColumn(
+            "Params",
+            6,
+            width=int(self.scale_factor * 150),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_CENTER,
+        )
+        stock = self.part_list.AppendTextColumn(
+            "Stock",
+            7,
+            width=int(self.scale_factor * 50),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_CENTER,
+        )
+        mfr = self.part_list.AppendTextColumn(
+            "Manufacturer",
+            8,
+            width=int(self.scale_factor * 100),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
+        description = self.part_list.AppendTextColumn(
+            "Description",
+            9,
+            width=int(self.scale_factor * 300),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
+        price = self.part_list.AppendTextColumn(
+            "Price",
+            10,
+            width=int(self.scale_factor * 100),
+            mode=dv.DATAVIEW_CELL_INERT,
+            align=wx.ALIGN_LEFT,
+        )
 
         # ---------------------------------------------------------------------
         # ------------------------ Result status line -------------------------
@@ -438,94 +613,30 @@ class PartSelectorDialog(wx.Dialog):
         self.result_count = wx.StaticText(
             self, wx.ID_ANY, "0 Results", wx.DefaultPosition, wx.DefaultSize
         )
+        # Toggle thumbnail size button (icon-only, 60x60 <-> 100x100)
+        self.thumb_toggle_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            wx.DefaultPosition,
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, -1)),
+            0,
+        )
+        try:
+            # Default state is 60px; clicking expands → show expand icon
+            self.thumb_toggle_button.SetBitmap(
+                loadBitmapScaled("mdi-arrow-expand-vertical.png", self.scale_factor)
+            )
+            self.thumb_toggle_button.SetBitmapMargins((2, 0))
+            self.thumb_toggle_button.SetToolTip("Increase thumbnail size")
+        except Exception:
+            pass
+        self.thumb_toggle_button.Bind(wx.EVT_BUTTON, self._toggle_thumb_size)
 
         result_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        result_sizer.Add(self.result_count, 0, wx.LEFT | wx.TOP, 5)
-
-        # ---------------------------------------------------------------------
-        # ------------------------- Result Part list --------------------------
-        # ---------------------------------------------------------------------
-
-        table_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        table_scroller = wx.ScrolledWindow(self, style=wx.HSCROLL | wx.VSCROLL)
-        table_scroller.SetScrollRate(20, 20)
-
-        self.part_list = dv.DataViewCtrl(
-            table_scroller,
-            style=wx.BORDER_THEME | dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE,
-        )
-
-        lcsc = self.part_list.AppendTextColumn(
-            "LCSC",
-            0,
-            width=int(self.scale_factor * 60),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_CENTER,
-        )
-        mfr_number = self.part_list.AppendTextColumn(
-            "MFR Number",
-            1,
-            width=int(self.scale_factor * 140),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
-        package = self.part_list.AppendTextColumn(
-            "Package",
-            2,
-            width=int(self.scale_factor * 100),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
-        pins = self.part_list.AppendTextColumn(
-            "Pins",
-            3,
-            width=int(self.scale_factor * 40),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_CENTER,
-        )
-        parttype = self.part_list.AppendTextColumn(
-            "Type",
-            4,
-            width=int(self.scale_factor * 50),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
-        params = self.part_list.AppendTextColumn(
-            "Params",
-            5,
-            width=int(self.scale_factor * 150),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_CENTER,
-        )
-        stock = self.part_list.AppendTextColumn(
-            "Stock",
-            6,
-            width=int(self.scale_factor * 50),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_CENTER,
-        )
-        mfr = self.part_list.AppendTextColumn(
-            "Manufacturer",
-            7,
-            width=int(self.scale_factor * 100),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
-        description = self.part_list.AppendTextColumn(
-            "Description",
-            8,
-            width=int(self.scale_factor * 300),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
-        price = self.part_list.AppendTextColumn(
-            "Price",
-            9,
-            width=int(self.scale_factor * 100),
-            mode=dv.DATAVIEW_CELL_INERT,
-            align=wx.ALIGN_LEFT,
-        )
+        # Place button left to the label with right margin
+        result_sizer.Add(self.thumb_toggle_button, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 5)
+        result_sizer.Add(self.result_count, 0, wx.TOP | wx.ALIGN_CENTER_VERTICAL, 5)
 
         lcsc.SetSortable(True)
         mfr_number.SetSortable(True)
@@ -539,31 +650,33 @@ class PartSelectorDialog(wx.Dialog):
         price.SetSortable(True)
 
         self.part_list.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, self.OnPartSelected)
-        self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.select_part)
+        # Open details on double-click / Enter
+        self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.get_part_details)
+
         scrolled_sizer = wx.BoxSizer(wx.VERTICAL)
         scrolled_sizer.Add(self.part_list, 1, wx.EXPAND)
         table_scroller.SetSizer(scrolled_sizer)
-
         table_sizer.Add(table_scroller, 20, wx.ALL | wx.EXPAND, 5)
 
         # ---------------------------------------------------------------------
         # ------------------------ Right side toolbar -------------------------
         # ---------------------------------------------------------------------
 
+        # Icon-only buttons; no labels
         self.select_part_button = wx.Button(
             self,
             wx.ID_ANY,
-            "Import part",
+            "",
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 36)),
             0,
         )
         self.part_details_button = wx.Button(
             self,
             wx.ID_ANY,
-            "Show part details",
+            "",
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 36)),
             0,
         )
         # New action buttons
@@ -583,20 +696,8 @@ class PartSelectorDialog(wx.Dialog):
         #     HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
         #     0,
         # )
-        # Image preview
-        self.preview_image = wx.StaticBitmap(
-            self,
-            wx.ID_ANY,
-            loadBitmapScaled("placeholder.png", self.scale_factor, static=True),
-            wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 150)),
-            0,
-        )
-        # Fix preview target size to avoid layout jumps
-        _size = HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, 150))
-        self._preview_w, self._preview_h = _size.GetWidth(), _size.GetHeight()
-        self.preview_image.SetMinSize(wx.Size(self._preview_w, self._preview_h))
-        self.preview_image.SetMaxSize(wx.Size(self._preview_w, self._preview_h))
+        # Remove right-side preview image per request
+        self._preview_w, self._preview_h = 0, 0
 
         self.select_part_button.Bind(wx.EVT_BUTTON, self.select_part)
         self.part_details_button.Bind(wx.EVT_BUTTON, self.get_part_details)
@@ -605,7 +706,7 @@ class PartSelectorDialog(wx.Dialog):
 
         self.select_part_button.SetBitmap(
             loadBitmapScaled(
-                "mdi-check.png",
+                "mdi-arrow-collapse-down.png",
                 self.scale_factor,
             )
         )
@@ -635,19 +736,16 @@ class PartSelectorDialog(wx.Dialog):
         # self.open_lcsc_button.SetBitmapMargins((2, 0))
 
         tool_sizer = wx.BoxSizer(wx.VERTICAL)
-        tool_sizer.Add(self.select_part_button, 0, wx.ALL, 5)
-        tool_sizer.Add(self.part_details_button, 0, wx.ALL, 5)
-        # tool_sizer.Add(self.open_datasheet_button, 0, wx.ALL, 5)
-        # tool_sizer.Add(self.open_lcsc_button, 0, wx.ALL, 5)
-        tool_sizer.Add(self.preview_image, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+        tool_sizer.Add(self.select_part_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+        tool_sizer.Add(self.part_details_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
 
         # Clear log button placed directly under preview
         self.clear_log_button = wx.Button(
             self,
             wx.ID_ANY,
-            "Clear log",
+            "",
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(150, -1)),
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 36)),
             0,
         )
         self.clear_log_button.SetBitmap(
@@ -659,8 +757,9 @@ class PartSelectorDialog(wx.Dialog):
             wx.EVT_BUTTON,
             lambda _evt: getattr(self.parent, "_clear_log", lambda *_: None)(),
         )
-        tool_sizer.Add(self.clear_log_button, 0, wx.ALL, 5)
-        table_sizer.Add(tool_sizer, 3, wx.EXPAND, 5)
+        tool_sizer.Add(self.clear_log_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+        # Reduce the right column width to button width only
+        table_sizer.Add(tool_sizer, 0, wx.TOP | wx.BOTTOM | wx.RIGHT, 5)
 
         # ---------------------------------------------------------------------
         # ------------------------------ Sizers  ------------------------------
@@ -672,8 +771,48 @@ class PartSelectorDialog(wx.Dialog):
         layout.Add(result_sizer, 1, wx.LEFT, 5)
         layout.Add(table_sizer, 20, wx.ALL | wx.EXPAND, 5)
 
-        self.part_list_model = PartSelectorDataModel()
+        # Prepare placeholder bitmap for thumbnails scaled to thumb size
+        _ph_bmp = loadBitmapScaled("placeholder.png", self.scale_factor, static=True)
+        try:
+            if isinstance(_ph_bmp, wx.Bitmap):
+                bmp = _ph_bmp
+            else:
+                bmp = _ph_bmp.GetBitmap(wx.Size(self._thumb_px, self._thumb_px))
+            img = bmp.ConvertToImage()
+            img = img.Scale(self._thumb_px, self._thumb_px, wx.IMAGE_QUALITY_HIGH)
+            placeholder_bmp = wx.Bitmap(img)
+        except Exception:
+            placeholder_bmp = wx.Bitmap(_ph_bmp) if isinstance(_ph_bmp, wx.Bitmap) else wx.Bitmap()
+
+        self.part_list_model = PartSelectorDataModel(placeholder_bmp)
         self.part_list.AssociateModel(self.part_list_model)
+
+        # Bind scroll/resize to trigger lazy thumbnail loading
+        # Bind scroll directly on the DataViewCtrl only (avoid duplicate events)
+        # try:
+        #     self.table_scroller.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
+        #     self.scrolled_sizer.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
+        #     self.part_list.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
+        #     pass
+        # except Exception:
+        #     self.logger.exception("Binding EVT_SCROLLWIN to part_list failed")
+        
+        self.part_list.Bind(wx.EVT_SIZE, self._on_table_viewport_changed)
+        # Ensure mousewheel scrolling keeps working: call Skip()
+        self.part_list.Bind(wx.EVT_MOUSEWHEEL, self._on_table_viewport_changed)
+
+        # Async thumbnail loading state
+        self._thumb_executor = ThreadPoolExecutor(max_workers=self.THUMB_MAX_WORKERS)
+        self._thumb_scheduled = set()
+        self._thumb_cache = {}
+        self._thumb_lock = Lock()
+        self._search_generation = 0
+        self._top_index = 0  # Initialize scroll position tracker
+        
+        # Timer for debouncing scroll events
+        self._scroll_timer = wx.Timer(self)
+        self._scroll_delay = 300  # ms to wait after scroll stops
+        self.Bind(wx.EVT_TIMER, self._on_scroll_timer, self._scroll_timer)
 
         self.SetSizer(layout)
         self.Layout()
@@ -686,10 +825,22 @@ class PartSelectorDialog(wx.Dialog):
             lib = (self.library or getattr(self.parent, "library", None))
             ready = bool(lib and getattr(lib, "state", None) == LibraryState.INITIALIZED)
         except Exception:
+            self.logger.exception("Error checking library readiness")
             ready = False
         self.set_db_ready(ready)
         if ready:
             self.search(None)
+
+    def on_scroll(self, evt):
+        self.logger.debug(evt.GetPosition());  # touch to avoid "unused variable" warning
+
+    def on_wheel(self, event):
+        self.logger.debug("on_wheel event")
+        # self.logger.debug(self.table_scroller.GetPosition())
+        self.logger.debug(self.scrolled_sizer.GetPosition())
+        # self.logger.debug(self.part_list.GetPosition())
+        # self.logger.debug("on_wheel event", self.part_list.GetScrollPos(wx.VERTICAL))
+        event.Skip()
 
     # -------------------- DB readiness helpers --------------------
     def _initial_categories(self):
@@ -699,6 +850,7 @@ class PartSelectorDialog(wx.Dialog):
         try:
             return lib.categories
         except Exception:
+            self.logger.exception("Failed to fetch initial categories")
             return []
 
     def set_db_ready(self, ready: bool):
@@ -712,7 +864,7 @@ class PartSelectorDialog(wx.Dialog):
             self.part_no.Enable(bool(ready))
             self.solder_joints.Enable(bool(ready))
         except Exception:
-            pass
+            self.logger.exception("Error enabling/disabling widgets in set_db_ready")
 
         if ready:
             self.refresh_categories()
@@ -726,10 +878,10 @@ class PartSelectorDialog(wx.Dialog):
                 try:
                     self.category.SetSelection(0)
                 except Exception:
-                    pass
+                    self.logger.exception("category SetSelection failed")
                 self.update_subcategories()
         except Exception:
-            pass
+            self.logger.exception("refresh_categories failed")
 
     def update_settings(self, event):
         """Update the settings on change."""
@@ -861,6 +1013,11 @@ class PartSelectorDialog(wx.Dialog):
             if search_duration > 1
             else f"{search_duration * 1000.0:.0f}ms"
         )
+        # Invalidate any in-flight thumbnail work and clear caches
+        self._search_generation += 1
+        with self._thumb_lock:
+            self._thumb_cache.clear()
+            self._thumb_scheduled.clear()
         self.part_list_model.RemoveAll()
         if parts is None:
             return
@@ -893,10 +1050,9 @@ class PartSelectorDialog(wx.Dialog):
         self._selected_lcsc = None
         self._pdfurl = ""
         self._pageurl = ""
-        self.preview_image.SetBitmap(
-            loadBitmapScaled("placeholder.png", self.scale_factor, static=True)
-        )
         self.Layout()
+        # trigger initial visible thumbnails loading
+        self._schedule_visible_thumbnails()
 
     def select_part(self, *_):
         """Save the selected part number and close the modal."""
@@ -942,38 +1098,17 @@ class PartSelectorDialog(wx.Dialog):
             try:
                 wx.EndBusyCursor()
             except Exception:
-                pass
+                self.logger.exception("wx.EndBusyCursor failed in update_selected_part_details")
         if not result or not result.get("success"):
             # Reset
             self._pdfurl = ""
             self._pageurl = ""
-            self.preview_image.SetBitmap(
-                loadBitmapScaled("placeholder.png", self.scale_factor, static=True)
-            )
-            self.Layout()
             return
         data = result.get("data", {}).get("data", {})
         self._pdfurl = data.get("dataManualUrl") or ""
         self._pageurl = data.get("lcscGoodsUrl") or ""
-        # resolve image
-        picture = data.get("minImage")
-        if picture:
-            picture = picture.replace("96x96", "900x900")
-        else:
-            imageId = data.get("productBigImageAccessId")
-            if imageId:
-                picture = f"https://jlcpcb.com/api/file/downloadByFileSystemAccessId/{imageId}"
+        # Right-side preview image removed; keep URLs only
         
-        if picture:
-            bmp = self.get_scaled_bitmap(picture, int(self._preview_w), int(self._preview_h))
-            self.preview_image.SetBitmap(bmp)
-            self.Layout()
-        else:
-            self.preview_image.SetBitmap(
-                loadBitmapScaled("placeholder.png", self.scale_factor, static=True)
-            )
-            self.Layout()
-            
     def get_scaled_bitmap(self, url, width, height):
         """Download a picture from a URL and convert it into a wx Bitmap.
 
@@ -1014,3 +1149,412 @@ class PartSelectorDialog(wx.Dialog):
         The results are limited to 1000.
         """
         wx.MessageBox(text, title, style=wx.ICON_INFORMATION)
+
+        
+    # ---------------------- Thumbnails (lazy loading) ----------------------
+    def _on_table_viewport_changed(self, evt):
+        # Allow the event to propagate so scrolling still works
+        try:
+            evt.Skip()
+        except Exception:
+            self.logger.exception("evt.Skip() failed in _on_table_viewport_changed")
+
+        # Recalculate visible range purely via HitTest (no wheel math)
+        try:
+            row_h = max(24, int(self._thumb_px + 2))
+            if hasattr(self.part_list, 'GetRowHeight'):
+                try:
+                    rh = self.part_list.GetRowHeight()
+                    if rh > 0:
+                        row_h = rh
+                except Exception:
+                    pass
+
+            main = self.part_list.GetMainWindow() # if hasattr(self.part_list, 'GetMainWindow') else self.part_list
+            size = main.GetClientSize()
+            w, h = size.GetWidth(), size.GetHeight()
+           
+            # Determine first and last visible rows by hit-testing points
+            # Use a few sample x positions within the first column area
+            test_x = 10
+            start_pt = (test_x, row_h)
+            end_pt = (test_x, h-1)
+
+            start_item, start_col = self.part_list.HitTest(start_pt)
+            end_item, end_col = self.part_list.HitTest(end_pt)
+
+            # DEBUG HITTEST: disabled noisy logs
+            # try:
+            #     self.logger.info(
+            #         "[HITTEST] start_pt=%s start_col=%s start_item_valid=%s; end_pt=%s end_col=%s end_item_valid=%s",
+            #         start_pt,
+            #         start_col,
+            #         bool(start_item and start_item.IsOk() if hasattr(start_item, 'IsOk') else start_item),
+            #         end_pt,
+            #         end_col,
+            #         bool(end_item and end_item.IsOk() if hasattr(end_item, 'IsOk') else end_item),
+            #     )
+            # except Exception:
+            #     pass
+
+            def _item_to_index(item):
+                try:
+                    obj = self.part_list_model.ItemToObject(item)
+                    return self.part_list_model.get_all().index(obj)
+                except Exception:
+                    return -1
+
+            start_idx = _item_to_index(start_item)
+            end_idx = _item_to_index(end_item)
+
+            # DEBUG HITTEST: disabled noisy logs
+            # try:
+            #     self.logger.info(
+            #         "[HITTEST] start_idx=%d end_idx=%d viewport_h=%d", start_idx, end_idx, h
+            #     )
+            # except Exception:
+            #     pass
+
+            # Fallback: if HitTest misses, estimate using row height
+            if start_idx < 0 or end_idx < 0:
+                
+                visible_count = max(1, (h + row_h - 1) // row_h)
+                total = len(self.part_list_model.get_all()) if hasattr(self.part_list_model, 'get_all') else 0
+                # keep existing top_index but clamp to bounds
+                max_start = max(0, total - visible_count)
+                self._top_index = max(0, min(getattr(self, '_top_index', 0), max_start))
+            else:
+                self._top_index = max(0, min(start_idx, end_idx))
+
+            # DEBUG SCROLL: disabled noisy logs
+            # try:
+            #     self.logger.info("[SCROLL DEBUG] top_index=%d (HitTest)", self._top_index)
+            # except Exception:
+            #     pass
+        except Exception:
+            pass
+
+        # Reset the scroll timer to debounce rapid scroll events
+        try:
+            self._scroll_timer.Stop()
+            self._scroll_timer.StartOnce(40)
+        except Exception:
+            pass
+
+    def _on_scroll_timer(self, evt):
+        """Called when scroll timer expires - now safe to load thumbnails"""
+        self._schedule_visible_thumbnails()
+        # pass
+        
+    def _schedule_visible_thumbnails(self):
+        """Schedule loading of thumbnails for visible items"""
+        try:
+            items = self._get_visible_items(prefetch_rows=self.THUMB_PREFETCH_ROWS)
+        except Exception:
+            items = []
+        try:
+            total_rows = len(self.part_list_model.get_all()) if hasattr(self.part_list_model, 'get_all') else -1
+            main = self.part_list.GetMainWindow() if hasattr(self.part_list, 'GetMainWindow') else self.part_list
+            view_h = main.GetClientSize().GetHeight()
+            # Збираємо лише список видимих LCSC
+            visible_lcsc = []
+            for item in items:
+                try:
+                    lcsc = self.part_list_model.get_lcsc(item)
+                    if lcsc is not None:
+                        visible_lcsc.append(str(lcsc))
+                except Exception:
+                    continue
+
+            # Запускаємо завантаження прев'ю для видимих елементів
+            rows = self.part_list_model.get_all() if hasattr(self.part_list_model, 'get_all') else []
+            for item in items:
+                try:
+                    lcsc = self.part_list_model.get_lcsc(item)
+                    if not lcsc:
+                        continue
+                    with self._thumb_lock:
+                        if lcsc in self._thumb_cache or lcsc in self._thumb_scheduled:
+                            continue
+                        self._thumb_scheduled.add(lcsc)
+                    try:
+                        row_obj = self.part_list_model.ItemToObject(item)
+                        row_index = rows.index(row_obj)
+                    except Exception:
+                        row_index = -1
+                    self._thumb_executor.submit(
+                        self._load_thumbnail_worker,
+                        lcsc,
+                        self._thumb_px,
+                        self._thumb_px,
+                        self._search_generation,
+                        row_index,
+                    )
+                except Exception:
+                    continue
+
+            # Узагальнений лог по видимих рядках і їх LCSC
+            # DEBUG VISIBLE: disabled noisy logs
+            # try:
+            #     self.logger.info(
+            #         "[VISIBLE] top_index=%d visible=%d total_rows=%d viewport_h=%d ids=%s",
+            #         getattr(self, '_top_index', 0), len(visible_lcsc), total_rows, view_h, ",".join(visible_lcsc)
+            #     )
+            # except Exception:
+            #     pass
+        except Exception:
+            self.logger.exception("Error preparing visible thumbnails in _schedule_visible_thumbnails")
+        # В режимі дебагу тільки логуємо але не завантажуємо
+        pass
+
+    def _get_visible_items(self, prefetch_rows=0):
+        """Calculate which items are currently visible in the viewport.
+        
+        Args:
+            prefetch_rows: Number of additional rows to include before and after the visible range
+            
+        Returns:
+            List of visible DataViewItem objects
+        """
+        try:
+            # Get dimensions
+            main = self.part_list.GetMainWindow() if hasattr(self.part_list, 'GetMainWindow') else self.part_list
+            view_h = main.GetClientSize().GetHeight()
+            row_h = max(24, int(self._thumb_px + 2))
+            
+            if hasattr(self.part_list, 'GetRowHeight'):
+                try:
+                    h = self.part_list.GetRowHeight()
+                    if h > 0:
+                        row_h = h
+                except Exception:
+                    pass
+
+            # Calculate visible range
+            visible_count = max(1, (view_h + row_h - 1) // row_h)
+            total = len(self.part_list_model.get_all()) if hasattr(self.part_list_model, 'get_all') else 0
+            
+            if total == 0:
+                return []
+
+            # Add prefetch padding
+            start = max(0, self._top_index - prefetch_rows)
+            end = min(total, self._top_index + visible_count + prefetch_rows)
+            
+            # Get DataViewItems for the visible range
+            items = []
+            for i in range(start, end):
+                try:
+                    row = self.part_list_model.get_all()[i]
+                    item = self.part_list_model.ObjectToItem(row)
+                    items.append(item)
+                except Exception:
+                    continue
+                    
+            return items
+
+        except Exception:
+            self.logger.exception("Error calculating visible items")
+            return []
+
+    def _toggle_thumb_size(self, *_):
+        """Toggle thumbnail size and adjust UI accordingly."""
+        try:
+            # Toggle between 60 and 100 px
+            new_size = 100 if self._thumb_px <= 60 else 60
+            self.THUMB_HEIGHT_PX = new_size
+            self._thumb_px = int(self.THUMB_HEIGHT_PX)
+
+            # Update button icon and tooltip to reflect next action
+            try:
+                if self._thumb_px >= 100:
+                    # Now large; clicking will collapse
+                    self.thumb_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-arrow-collapse-vertical.png", self.scale_factor)
+                    )
+                    self.thumb_toggle_button.SetToolTip("Decrease thumbnail size")
+                else:
+                    # Now small; clicking will expand
+                    self.thumb_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-arrow-expand-vertical.png", self.scale_factor)
+                    )
+                    self.thumb_toggle_button.SetToolTip("Increase thumbnail size")
+            except Exception:
+                pass
+
+            # Adjust row height if supported
+            try:
+                if hasattr(self.part_list, 'SetRowHeight'):
+                    self.part_list.SetRowHeight(max(24, self._thumb_px + 2))
+            except Exception:
+                pass
+
+            # Adjust first column width to match thumbnail
+            try:
+                col = self.part_list.GetColumn(0)
+                col.SetWidth(int(self._thumb_px + 8))
+            except Exception:
+                pass
+
+            # Invalidate thumbs so they get regenerated at new size
+            with self._thumb_lock:
+                self._thumb_cache.clear()
+                self._thumb_scheduled.clear()
+
+            # Force refresh of visible thumbnails
+            self._schedule_visible_thumbnails()
+            try:
+                self.part_list.Refresh()
+                self.table_scroller.Layout()
+                self.Layout()
+            except Exception:
+                pass
+        except Exception:
+            self.logger.exception("Failed to toggle thumbnail size")
+
+    def _toggle_advanced(self, *_):
+        """Show/hide the advanced filters block under the search row."""
+        try:
+            self._advanced_visible = not getattr(self, '_advanced_visible', True)
+            try:
+                self.advanced_panel.Show(self._advanced_visible)
+            except Exception:
+                pass
+            # Update icon and tooltip
+            try:
+                if self._advanced_visible:
+                    self.advanced_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-chevron-up.png", self.scale_factor)
+                    )
+                    self.advanced_toggle_button.SetToolTip("Hide advanced filters")
+                else:
+                    self.advanced_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-chevron-down.png", self.scale_factor)
+                    )
+                    self.advanced_toggle_button.SetToolTip("Show advanced filters")
+            except Exception:
+                pass
+            # Relayout to give more room to results
+            try:
+                self.Layout()
+                self.part_list.Refresh()
+                self.table_scroller.Layout()
+            except Exception:
+                pass
+        except Exception:
+            self.logger.exception("Failed to toggle advanced filters visibility")
+
+    def _load_thumbnail_worker(self, lcsc: str, width: int, height: int, generation: int, row_index: int):
+        # Resolve image URL via API
+        try:
+            # DEBUG THUMB: disabled noisy logs
+            # try:
+            #     self.logger.info("thumb start: row=%d lcsc=%s", row_index, lcsc)
+            # except Exception:
+            #     self.logger.exception("Logging thumb start failed")
+            result = self._lcsc_api.get_part_data(lcsc)
+            if not result or not result.get("success"):
+                raise RuntimeError("part data not found")
+            data = result.get("data", {}).get("data", {})
+            picture = data.get("minImage")
+            # if picture:
+                # picture = picture.replace("96x96", "300x300")
+            # else:
+            if not picture:
+                imageId = data.get("productBigImageAccessId")
+                if imageId:
+                    picture = f"https://jlcpcb.com/api/file/downloadByFileSystemAccessId/{imageId}"
+            
+            if not picture:
+                raise RuntimeError("no picture url")
+            # DEBUG THUMB: disabled noisy logs
+            # try:
+            #     self.logger.info("thumb url: row=%d lcsc=%s url=%s", row_index, lcsc, picture)
+            # except Exception:
+            #     self.logger.exception("Logging thumb url failed")
+            io_bytes = self._lcsc_api.download_bitmap(picture)
+            if not io_bytes:
+                raise RuntimeError("download failed")
+            bmp = None
+            if Image is not None:
+                # Pillow path
+                img = Image.open(io_bytes)
+                img = img.convert("RGBA")
+                if ImageOps is not None:
+                    # Crop/fit to fill cell height and width
+                    img = ImageOps.fit(img, (width, height), Image.LANCZOS, centering=(0.5, 0.5))
+                else:
+                    # Fallback to contain
+                    img.thumbnail((width, height), Image.LANCZOS)
+                w, h = img.size
+                buf = img.tobytes()  # RGBA
+                try:
+                    image = wx.Image(w, h)
+                    # Split RGBA to RGB + Alpha for wx.Image
+                    rgb = bytearray()
+                    alpha = bytearray()
+                    for i in range(0, len(buf), 4):
+                        r, g, b, a = buf[i : i + 4]
+                        rgb.extend((r, g, b))
+                        alpha.append(a)
+                    image.SetData(bytes(rgb))
+                    image.SetAlpha(bytes(alpha))
+                    bmp = wx.Bitmap(image)
+                except Exception:
+                    try:
+                        bmp = wx.Bitmap.FromBufferRGBA(w, h, buf)
+                    except Exception:
+                        bmp = None
+            if bmp is None:
+                # Fallback to wx.Image decode (use LoadStream to avoid type issues)
+                try:
+                    io_bytes.seek(0)
+                    image = wx.Image()
+                    ok = image.LoadStream(io_bytes)
+                    if not ok or not image.IsOk():
+                        raise RuntimeError("Decode failed")
+                    image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
+                    bmp = wx.Bitmap(image)
+                except Exception:
+                    # Last resort placeholder to avoid empty cell
+                    image = wx.Image(width, height)
+                    image.SetRGBRect(wx.Rect(0, 0, width, height), 240, 240, 240)
+                    bmp = wx.Bitmap(image)
+        except Exception as exc:  # noqa: BLE001
+            # Mark as attempted to avoid retry storms
+            with self._thumb_lock:
+                self._thumb_cache[lcsc] = None
+                self._thumb_scheduled.discard(lcsc)
+            try:
+                # Log URL that failed to decode
+                self.logger.warning(
+                    "thumb failed: row=%d lcsc=%s url=%s err=%s",
+                    row_index,
+                    lcsc,
+                    locals().get('picture', None),
+                    exc,
+                )
+            except Exception:
+                self.logger.exception("Logging thumb failure warning failed")
+            return
+        # Update UI on main thread
+        def _apply():
+            # Discard if a newer search repopulated the model
+            if generation != self._search_generation:
+                return
+            try:
+                with self._thumb_lock:
+                    self._thumb_cache[lcsc] = bmp
+                    self._thumb_scheduled.discard(lcsc)
+                self.part_list_model.set_thumbnail_for_lcsc(lcsc, bmp)
+                # DEBUG THUMB APPLIED: disabled noisy logs
+                # try:
+                #     self.logger.info("thumb applied: row=%d lcsc=%s size=%dx%d", row_index, lcsc, bmp.GetWidth(), bmp.GetHeight())
+                # except Exception:
+                #     self.logger.exception("Logging thumb applied info failed")
+            except Exception:
+                with self._thumb_lock:
+                    self._thumb_cache[lcsc] = None
+                    self._thumb_scheduled.discard(lcsc)
+                self.logger.exception("Failed to apply thumbnail to model/UI")
+        wx.CallAfter(_apply)

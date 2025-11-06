@@ -239,24 +239,32 @@ class PartListDataModel(dv.PyDataViewModel):
         self.toggle_pos(item)
 
 class PartSelectorDataModel(dv.PyDataViewModel):
-    """Datamodel for use with the DataViewCtrl of the partselector modal window."""
+    """Datamodel for use with the DataViewCtrl of the partselector modal window.
 
-    def __init__(self):
+    Adds a first column for a thumbnail image (icon-only).
+    Thumbnails are provided asynchronously by the UI and stored in the first
+    element of each row. If not yet available, a placeholder icon is shown.
+    """
+
+    def __init__(self, placeholder_bitmap=None):
         super().__init__()
         self.data = []
+        # Column mapping including leading image column
         self.columns = {
-            "LCSC_COL": 0,
-            "MFR_NUMBER_COL": 1,
-            "PACKAGE_COL": 2,
-            "PIN_COL": 3,
-            "TYPE_COL": 4,
-            "PARAMS_COL": 5,
-            "STOCK_COL": 6,
-            "MFR_COL": 7,
-            "DESCR_COL": 8,
-            "PRICE_COL": 9,
+            "IMAGE_COL": 0,
+            "LCSC_COL": 1,
+            "MFR_NUMBER_COL": 2,
+            "PACKAGE_COL": 3,
+            "PIN_COL": 4,
+            "TYPE_COL": 5,
+            "PARAMS_COL": 6,
+            "STOCK_COL": 7,
+            "MFR_COL": 8,
+            "DESCR_COL": 9,
+            "PRICE_COL": 10,
         }
 
+        self.placeholder_bitmap = placeholder_bitmap
         self.logger = logging.getLogger(__name__)
 
     @staticmethod
@@ -274,6 +282,8 @@ class PartSelectorDataModel(dv.PyDataViewModel):
     def GetColumnType(self, col):
         """Get type of each column."""
         columntypes = (
+            "wxBitmap",  # IMAGE_COL
+            "string",
             "string",
             "string",
             "string",
@@ -305,6 +315,9 @@ class PartSelectorDataModel(dv.PyDataViewModel):
     def GetValue(self, item, col):
         """Get value of an item."""
         row = self.ItemToObject(item)
+        if col == self.columns["IMAGE_COL"]:
+            bmp = row[col] if row[col] else self.placeholder_bitmap
+            return bmp
         return row[col]
 
     def SetValue(self, value, item, col):
@@ -334,7 +347,13 @@ class PartSelectorDataModel(dv.PyDataViewModel):
             return None
 
     def AddEntry(self, data: list):
-        """Add a new entry to the data model."""
+        """Add a new entry to the data model.
+
+        'data' is expected to match the database row produced by search()
+        with the UI inserting the 'Params' at index 5. This model prepends
+        a placeholder for the thumbnail column.
+        """
+        data.insert(0, None)  # placeholder for thumbnail (wx.Bitmap)
         self.data.append(data)
         self.ItemAdded(dv.NullDataViewItem, self.ObjectToItem(data))
 
@@ -367,7 +386,7 @@ class PartSelectorDataModel(dv.PyDataViewModel):
         """
         row = self.ItemToObject(item)
         try:
-            return row[10]
+            return row[11]  # account for prepended image column
         except Exception:
             return ""
 
@@ -397,6 +416,17 @@ class PartSelectorDataModel(dv.PyDataViewModel):
         try:
             row = self.ItemToObject(item)
             # After inserting Params at index 5, 'Attributes' ends up at index 11
-            return row[11]
+            return row[12]  # account for prepended image column
         except Exception:
             return ""
+
+    # ----------------------- Thumbnails helpers -----------------------
+    def set_thumbnail_for_lcsc(self, lcsc: str, bitmap):
+        """Set a thumbnail bitmap for the row matching the given LCSC code."""
+        try:
+            row = next(r for r in self.data if r[self.columns["LCSC_COL"]] == lcsc)
+        except StopIteration:
+            return False
+        row[self.columns["IMAGE_COL"]] = bitmap
+        self.ItemChanged(self.ObjectToItem(row))
+        return True
