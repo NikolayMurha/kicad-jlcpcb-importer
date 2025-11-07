@@ -807,7 +807,7 @@ class PartSelectorDialog(wx.Dialog):
             self.search(None)
 
     def on_scroll(self, evt):
-        self.logger.debug(evt.GetPosition());  # touch to avoid "unused variable" warning
+        self.logger.debug(evt.GetPosition())  # touch to avoid "unused variable" warning
 
     def on_wheel(self, event):
         self.logger.debug("on_wheel event")
