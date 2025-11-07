@@ -310,7 +310,9 @@ class PartSelectorDialog(wx.Dialog):
             0,
         )
 
-        self._advanced_visible = False
+        self._advanced_visible = bool(
+            (self.settings or {}).get("partselector", {}).get("advanced_visible", False)
+        )
         self.advanced_toggle_button = wx.Button(
             self,
             wx.ID_ANY,
@@ -357,15 +359,6 @@ class PartSelectorDialog(wx.Dialog):
 
         # Advanced toggle button (to the right of Search)
       
-        try:
-            self.advanced_toggle_button.SetBitmap(
-                loadBitmapScaled("mdi-chevron-down.png", self.scale_factor)
-            )
-            self.advanced_toggle_button.SetBitmapMargins((0, 2))
-            self.advanced_toggle_button.SetToolTip("Show advanced filters")
-        except Exception:
-            pass
-        # keyword_search_row1.Add(self.advanced_toggle_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.ALIGN_CENTER_VERTICAL, 5)
         # Match advanced toggle height to Search button height while keeping 24px width
         try:
             sh = self.search_button.GetSize().GetHeight()
@@ -477,11 +470,12 @@ class PartSelectorDialog(wx.Dialog):
         # Wrap advanced row into a panel to toggle visibility as a block
         self.advanced_panel.SetSizer(search_sizer_row2)
         search_sizer.Add(self.advanced_panel, 0, wx.EXPAND)
-        # Start hidden by default
+        # Apply persisted visibility preference
         try:
-            self.advanced_panel.Show(False)
+            self.advanced_panel.Show(self._advanced_visible)
         except Exception:
             pass
+        self._update_advanced_toggle_visuals()
 
         # Remove automatic search on typing; bind Enter to perform search
         self.keyword.Bind(wx.EVT_TEXT_ENTER, self.search)
@@ -563,10 +557,10 @@ class PartSelectorDialog(wx.Dialog):
             mode=dv.DATAVIEW_CELL_INERT,
             align=wx.ALIGN_CENTER,
         )
-        parttype = self.part_list.AppendTextColumn(
-            "Type",
-            5,
-            width=int(self.scale_factor * 50),
+        price = self.part_list.AppendTextColumn(
+            "Price",
+            10,
+            width=int(self.scale_factor * 100),
             mode=dv.DATAVIEW_CELL_INERT,
             align=wx.ALIGN_LEFT,
         )
@@ -580,7 +574,7 @@ class PartSelectorDialog(wx.Dialog):
         stock = self.part_list.AppendTextColumn(
             "Stock",
             7,
-            width=int(self.scale_factor * 50),
+            width=int(self.scale_factor * 70),
             mode=dv.DATAVIEW_CELL_INERT,
             align=wx.ALIGN_CENTER,
         )
@@ -598,10 +592,10 @@ class PartSelectorDialog(wx.Dialog):
             mode=dv.DATAVIEW_CELL_INERT,
             align=wx.ALIGN_LEFT,
         )
-        price = self.part_list.AppendTextColumn(
-            "Price",
-            10,
-            width=int(self.scale_factor * 100),
+        parttype = self.part_list.AppendTextColumn(
+            "Type",
+            5,
+            width=int(self.scale_factor * 50),
             mode=dv.DATAVIEW_CELL_INERT,
             align=wx.ALIGN_LEFT,
         )
@@ -739,25 +733,6 @@ class PartSelectorDialog(wx.Dialog):
         tool_sizer.Add(self.select_part_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
         tool_sizer.Add(self.part_details_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
 
-        # Clear log button placed directly under preview
-        self.clear_log_button = wx.Button(
-            self,
-            wx.ID_ANY,
-            "",
-            wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 36)),
-            0,
-        )
-        self.clear_log_button.SetBitmap(
-            loadBitmapScaled("mdi-trash-can-outline.png", self.scale_factor)
-        )
-        self.clear_log_button.SetBitmapMargins((2, 0))
-        # Delegate action to the parent host if available
-        self.clear_log_button.Bind(
-            wx.EVT_BUTTON,
-            lambda _evt: getattr(self.parent, "_clear_log", lambda *_: None)(),
-        )
-        tool_sizer.Add(self.clear_log_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
         # Reduce the right column width to button width only
         table_sizer.Add(tool_sizer, 0, wx.TOP | wx.BOTTOM | wx.RIGHT, 5)
 
@@ -1006,6 +981,12 @@ class PartSelectorDialog(wx.Dialog):
                 return float(price)
         return -1.0
 
+    @staticmethod
+    def _format_currency(value: float) -> str:
+        """Format monetary values with trimmed trailing zeros."""
+        formatted = f"{value:.3f}".rstrip("0").rstrip(".")
+        return f"${formatted or '0'}"
+
     def populate_part_list(self, parts, search_duration):
         """Populate the list with the result of the search."""
         search_duration_text = (
@@ -1028,14 +1009,15 @@ class PartSelectorDialog(wx.Dialog):
             )
         else:
             self.result_count.SetLabel(f"{count} Results in {search_duration_text}")
+        qty = len(self.parts)
         for p in parts:
             item = [str(c) for c in p]
             pricecol = 8  # Must match order in library.py search function
-            price = round(self.get_price(len(self.parts), item[pricecol]), 3)
+            price = round(self.get_price(qty, item[pricecol]), 3)
             if price > 0:
-                sum = round(price * len(self.parts), 3)
+                total = round(price * qty, 3)
                 item[pricecol] = (
-                    f"{len(self.parts)} parts: ${price} each / ${sum} total"
+                    f"{qty}x{self._format_currency(price)} -> {self._format_currency(total)}"
                 )
             else:
                 item[pricecol] = "Error in price data"
@@ -1415,25 +1397,12 @@ class PartSelectorDialog(wx.Dialog):
     def _toggle_advanced(self, *_):
         """Show/hide the advanced filters block under the search row."""
         try:
-            self._advanced_visible = not getattr(self, '_advanced_visible', True)
+            self._advanced_visible = not bool(getattr(self, "_advanced_visible", False))
             try:
                 self.advanced_panel.Show(self._advanced_visible)
             except Exception:
                 pass
-            # Update icon and tooltip
-            try:
-                if self._advanced_visible:
-                    self.advanced_toggle_button.SetBitmap(
-                        loadBitmapScaled("mdi-chevron-up.png", self.scale_factor)
-                    )
-                    self.advanced_toggle_button.SetToolTip("Hide advanced filters")
-                else:
-                    self.advanced_toggle_button.SetBitmap(
-                        loadBitmapScaled("mdi-chevron-down.png", self.scale_factor)
-                    )
-                    self.advanced_toggle_button.SetToolTip("Show advanced filters")
-            except Exception:
-                pass
+            self._update_advanced_toggle_visuals()
             # Relayout to give more room to results
             try:
                 self.Layout()
@@ -1441,8 +1410,37 @@ class PartSelectorDialog(wx.Dialog):
                 self.table_scroller.Layout()
             except Exception:
                 pass
+            try:
+                wx.PostEvent(
+                    (self.parent or self),
+                    UpdateSetting(
+                        section="partselector",
+                        setting="advanced_visible",
+                        value=self._advanced_visible,
+                    ),
+                )
+            except Exception:
+                pass
         except Exception:
             self.logger.exception("Failed to toggle advanced filters visibility")
+
+    def _update_advanced_toggle_visuals(self):
+        """Sync toggle button icon/tooltip with the current visibility state."""
+        try:
+            if self._advanced_visible:
+                self.advanced_toggle_button.SetBitmap(
+                    loadBitmapScaled("mdi-chevron-up.png", self.scale_factor)
+                )
+                self.advanced_toggle_button.SetBitmapMargins((0, 2))
+                self.advanced_toggle_button.SetToolTip("Hide advanced filters")
+            else:
+                self.advanced_toggle_button.SetBitmap(
+                    loadBitmapScaled("mdi-chevron-down.png", self.scale_factor)
+                )
+                self.advanced_toggle_button.SetBitmapMargins((0, 2))
+                self.advanced_toggle_button.SetToolTip("Show advanced filters")
+        except Exception:
+            pass
 
     def _load_thumbnail_worker(self, lcsc: str, width: int, height: int, generation: int, row_index: int):
         # Resolve image URL via API

@@ -106,7 +106,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if layout:
             layout.Insert(0, topbar, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Add bottom console
+        # Add bottom console with clear button
+        console_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
         self.console = wx.TextCtrl(
             self,
             wx.ID_ANY,
@@ -116,6 +118,28 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             wx.TE_MULTILINE | wx.TE_READONLY,
         )
         self.console.SetMinSize(HighResWxSize(self.window, wx.Size(-1, 140)))
+        
+        self.clear_log_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            wx.DefaultPosition,
+            HighResWxSize(self.window, wx.Size(36, 36)),
+            0,
+        )
+        self.clear_log_button.SetBitmap(
+            loadBitmapScaled("mdi-trash-can-outline.png", self.scale_factor)
+        )
+        self.clear_log_button.SetBitmapMargins((2, 0))
+        self.clear_log_button.Bind(wx.EVT_BUTTON, self._clear_log)
+        
+        console_sizer.Add(self.console, 1, wx.EXPAND | wx.RIGHT, 5)
+        # Right zone with button aligned to the far right
+        btn_zone = wx.BoxSizer(wx.HORIZONTAL)
+        btn_zone.AddStretchSpacer(1)  # push the button to the right edge
+        btn_zone.Add(self.clear_log_button, 0, wx.ALIGN_TOP | wx.RIGHT, 8)
+        console_sizer.Add(btn_zone, 0, wx.EXPAND, 0)
+        
         # Progress gauge under the console
         self.gauge = wx.Gauge(
             self,
@@ -127,8 +151,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         )
         self.gauge.SetValue(0)
         self.gauge.SetMinSize(HighResWxSize(self.window, wx.Size(-1, 5)))
+        
         if layout:
-            layout.Add(self.console, 0, wx.ALL | wx.EXPAND, 5)
+            layout.Add(console_sizer, 0, wx.ALL | wx.EXPAND, 5)
             layout.Add(self.gauge, 0, wx.ALL | wx.EXPAND, 5)
             self.Layout()
 
