@@ -172,7 +172,7 @@ Allows the plugin UI to be started without KiCAD, enabling debugging with an IDE
 
 Standalone mode is under development.
 
-### Limitations
+### Standalone limitations
 
 - All board / footprint / value data are hardcoded stubs, see standalone_impl.py
 

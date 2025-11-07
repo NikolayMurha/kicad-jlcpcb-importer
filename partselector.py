@@ -1154,7 +1154,7 @@ class PartSelectorDialog(wx.Dialog):
 
             main = self.part_list.GetMainWindow() # if hasattr(self.part_list, 'GetMainWindow') else self.part_list
             size = main.GetClientSize()
-            w, h = size.GetWidth(), size.GetHeight()
+            h = size.GetHeight()
            
             # Determine first and last visible rows by hit-testing points
             # Use a few sample x positions within the first column area
@@ -1235,9 +1235,6 @@ class PartSelectorDialog(wx.Dialog):
         except Exception:
             items = []
         try:
-            total_rows = len(self.part_list_model.get_all()) if hasattr(self.part_list_model, 'get_all') else -1
-            main = self.part_list.GetMainWindow() if hasattr(self.part_list, 'GetMainWindow') else self.part_list
-            view_h = main.GetClientSize().GetHeight()
             # Збираємо лише список видимих LCSC
             visible_lcsc = []
             for item in items:
@@ -1279,8 +1276,8 @@ class PartSelectorDialog(wx.Dialog):
             # DEBUG VISIBLE: disabled noisy logs
             # try:
             #     self.logger.info(
-            #         "[VISIBLE] top_index=%d visible=%d total_rows=%d viewport_h=%d ids=%s",
-            #         getattr(self, '_top_index', 0), len(visible_lcsc), total_rows, view_h, ",".join(visible_lcsc)
+            #         "[VISIBLE] top_index=%d visible=%d ids=%s",
+            #         getattr(self, '_top_index', 0), len(visible_lcsc), ",".join(visible_lcsc)
             #     )
             # except Exception:
             #     pass
