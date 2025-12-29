@@ -1,8 +1,8 @@
 {
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "KiCad JLCPCB Importer",
-    "description": "Search LCSC/JLCPCB parts and import to KiCad",
-    "description_full": "Search the LCSC/JLCPCB catalog, assign LCSC numbers, and import symbols, footprints, and 3D models via easyeda2kicad. Supports project/system library locations and automatic table updates.",
+    "description": "Search LCSC/JLCPCB parts and import via ComponentLoader",
+    "description_full": "Search the LCSC/JLCPCB catalog, assign LCSC numbers, and import symbols/footprints/3D models via the EasyEDA ComponentLoader backend. Project/system library location settings remain available.",
     "identifier": "com.github.nikolaymurha.kicad-jlcpcb-importer",
     "type": "plugin",
     "author": {

@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 import wx  # pylint: disable=import-error
 
-from .events import (
+from ..core.events import (
     UnzipCombiningProgressEvent,
     UnzipCombiningStartedEvent,
     UnzipExtractingCompletedEvent,

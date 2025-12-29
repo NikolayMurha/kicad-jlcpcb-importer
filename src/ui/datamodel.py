@@ -5,7 +5,7 @@ import re
 
 import wx.dataview as dv
 
-from .helpers import loadIconScaled
+from ..core.helpers import loadIconScaled
 
 
 class PartListDataModel(dv.PyDataViewModel):

@@ -10,16 +10,21 @@ Thanks and credit to the original project that inspired this work:
 What it does
 
 - Search LCSC/JLCPCB catalog and assign LCSC numbers to footprints
-- Import symbol, footprint and 3D model via easyeda2kicad for a selected LCSC part
+- Import symbols, footprints, and 3D models via the EasyEDA ComponentLoader backend
 - Choose where to store generated libraries: Project or System (KiCad 9 3rd‑party locations)
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
-- Configurable library prefix (default: `LCSC_`) and project library folder (default: `library`)
+- Configurable library prefix (default: `JLCPCB`) and project library folder (default: `library`)
 
 ## Limitations
 
 - KiCad 9 currently does not provide a Python API to force refresh or reload library tables (symbols/footprints) at runtime.
 - After importing a component (and updating `sym-lib-table` / `fp-lib-table` on disk), restart KiCad or reopen the project to see newly added libraries in browsers and pickers.
 - In System storage mode, KiCad auto‑scans configured 3rd‑party folders and applies your configured nickname prefix, but visibility in the current session may still require a restart.
+
+## Known issues
+
+- Footprints may not appear in the library browsers due to KiCad's `fp-info-cache`.
+  - Workaround: after import, close KiCad, delete `fp-info-cache` in the project folder, then start KiCad again.
 
 Screenshots
 
@@ -141,7 +146,7 @@ In the near future I'll add `ruff` / `pylint` and possibly other pre-commit-hook
 
 ## Notes
 
-- This fork focuses on searching LCSC parts and importing KiCad libraries via easyeda2kicad.
+- This fork focuses on searching LCSC parts and managing KiCad library assignments with EasyEDA ComponentLoader for imports.
 - Fabrication (Gerber/CPL/BOM) features from the original tool are not included.
 
 ## python libraries

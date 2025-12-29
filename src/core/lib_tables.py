@@ -31,9 +31,16 @@ class LibTablesManager:
             return "(sym_lib_table\r\n  (version 7))\r\n"
         return "(fp_lib_table\r\n  (version 7))\r\n"
 
-    def _ensure_entry(self, tbl_path: Path, tbl_kind: str, name: str, uri: str) -> bool:
+    def _ensure_entry(
+        self,
+        tbl_path: Path,
+        tbl_kind: str,
+        name: str,
+        uri: str,
+        lib_type: str = "KiCad",
+    ) -> bool:
         entry = (
-            f"  (lib (name \"{name}\")(type \"KiCad\")(uri \"{uri}\")(options \"\")(descr \"\"))\n"
+            f"  (lib (name \"{name}\")(type \"{lib_type}\")(uri \"{uri}\")(options \"\")(descr \"\"))\n"
         )
         content = self._read(tbl_path)
         if not content:
@@ -74,11 +81,12 @@ class LibTablesManager:
         lib_dir = Path(out_dir)
         sym_files = sorted(lib_dir.rglob("*.kicad_sym"))
         pretty_dirs = sorted(p for p in lib_dir.rglob("*.pretty") if p.is_dir())
+        elibz_files = sorted(lib_dir.rglob("*.elibz"))
         lib_base = lib_dir
 
         self._log(
             f"Updating library tables in: {project_dir}\n"
-            f"Found symbols: {len(sym_files)}; footprint libs: {len(pretty_dirs)}\n"
+            f"Found symbols: {len(sym_files)}; footprint libs: {len(pretty_dirs)}; elibz: {len(elibz_files)}\n"
         )
 
         sym_content = self._read(sym_tbl)
@@ -117,12 +125,33 @@ class LibTablesManager:
                 self._log(f"Added footprint lib: {name} -> {uri}\n")
                 fp_content = self._read(fp_tbl)
                 changes += 1
+        for elibz in elibz_files:
+            if use_project_relative:
+                try:
+                    rel = elibz.resolve().relative_to(project_dir.resolve()).as_posix()
+                except Exception:
+                    rel = elibz.resolve().as_posix()
+                uri = f"${{KIPRJMOD}}/{rel}"
+            else:
+                uri = elibz.resolve().as_posix()
+
+            sym_name = self._unique_name(elibz.stem, sym_content)
+            if self._ensure_entry(sym_tbl, "sym", sym_name, uri, lib_type="EasyEDA (JLCEDA) Pro"):
+                self._log(f"Added elibz sym lib: {sym_name} -> {uri}\n")
+                sym_content = self._read(sym_tbl)
+                changes += 1
+
+            fp_name = self._unique_name(elibz.stem, fp_content)
+            if self._ensure_entry(fp_tbl, "fp", fp_name, uri, lib_type="EasyEDA / JLCEDA Pro"):
+                self._log(f"Added elibz fp lib: {fp_name} -> {uri}\n")
+                fp_content = self._read(fp_tbl)
+                changes += 1
 
         if changes == 0:
-            if not sym_files and not pretty_dirs:
+            if not sym_files and not pretty_dirs and not elibz_files:
                 self._log(
                     "No new libraries found to add. "
-                    "Ensure easyeda2kicad generated *.kicad_sym and *.pretty in the specified directory.\n"
+                    "Ensure generated *.kicad_sym, *.pretty folders, or *.elibz files exist in the specified directory.\n"
                 )
             else:
                 self._log(

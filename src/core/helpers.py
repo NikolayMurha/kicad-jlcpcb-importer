@@ -7,7 +7,14 @@ import re
 import wx  # pylint: disable=import-error
 import wx.dataview  # pylint: disable=import-error
 
-PLUGIN_PATH = Path(__file__).resolve().parent
+def _resolve_plugin_path() -> Path:
+    here = Path(__file__).resolve()
+    for parent in [here.parent, *here.parents]:
+        if (parent / "plugin.py").is_file() and (parent / "VERSION").is_file():
+            return parent
+    return here.parent
+
+PLUGIN_PATH = _resolve_plugin_path()
 
 EXCLUDE_FROM_POS = 2
 EXCLUDE_FROM_BOM = 3

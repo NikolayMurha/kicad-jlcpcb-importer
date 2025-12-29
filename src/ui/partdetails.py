@@ -8,9 +8,9 @@ import os
 import wx  # pylint: disable=import-error
 import wx.dataview  # pylint: disable=import-error
 
-from .events import MessageEvent
-from .helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
-from .lcsc_api import LCSC_API
+from ..core.events import MessageEvent
+from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
+from ..core.lcsc_api import LCSC_API
 
 
 class PartDetailsDialog(wx.Dialog):
@@ -303,15 +303,8 @@ class PartDetailsDialog(wx.Dialog):
                     str(attribute.get("attribute_value_name")),
                 ]
             )
-        picture = result["data"].get("data", {}).get("minImage")
-        if picture:
-            # get the full resolution image instead of the thumbnail
-            picture = picture.replace("96x96", "900x900")
-        else:
-            imageId = result["data"].get("data", {}).get("productBigImageAccessId")
-            picture = (
-                f"https://jlcpcb.com/api/file/downloadByFileSystemAccessId/{imageId}"
-            )
+        data = result["data"].get("data", {})
+        picture = self.lcsc_api.resolve_part_image_url(data, size="900x900")
         if picture:
             self.image.SetBitmap(
                 self.get_scaled_bitmap(
@@ -321,8 +314,8 @@ class PartDetailsDialog(wx.Dialog):
                 )
             )
 
-        self.pdfurl = result["data"].get("data", {}).get("dataManualUrl")
-        self.pageurl = result["data"].get("data", {}).get("lcscGoodsUrl")
+        self.pdfurl = data.get("dataManualUrl")
+        self.pageurl = data.get("lcscGoodsUrl")
 
     def report_part_data_fetch_error(self, reason):
         """Spawn a message box with an erro message if the fetch fails."""

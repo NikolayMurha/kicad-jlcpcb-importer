@@ -7,14 +7,15 @@ import logging
 import subprocess
 import shutil
 import threading
+import shlex
 from pathlib import Path
 import wx
 from typing import Optional, Dict
 
 from .partselector import PartSelectorDialog
 from .settings import SettingsDialog
-from .helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
-from .events import (
+from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
+from ..core.events import (
     EVT_LOGBOX_APPEND_EVENT,
     EVT_MESSAGE_EVENT,
     EVT_DOWNLOAD_STARTED_EVENT,
@@ -28,8 +29,8 @@ from .events import (
     LogboxAppendEvent,
     MessageEvent,
 )
-from .library import Library, LibraryState
-from .easyeda_importer import EasyedaImporter
+from ..core.library import Library, LibraryState
+from ..importers.importer import EasyedaImporter
 
 import pcbnew as kicad_pcbnew  # pylint: disable=import-error
 
@@ -63,6 +64,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.library = Library(self)
         # Dependencies state
         self._deps_ready = False
+        self._deps_prompted = False
+        self._deps_installing = False
 
         # Build the PartSelectorDialog with self as the logical parent context
         super().__init__(self, parts={})
@@ -172,7 +175,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.Bind(EVT_UNZIP_EXTRACTING_PROGRESS_EVENT, self._on_progress_update)
         self.Bind(EVT_UNZIP_EXTRACTING_COMPLETED_EVENT, self._on_progress_reset)
         # Settings updates from PartSelectorDialog
-        from .events import EVT_UPDATE_SETTING  # local import to avoid cycle
+        from ..core.events import EVT_UPDATE_SETTING  # local import to avoid cycle
         self.Bind(EVT_UPDATE_SETTING, self._on_update_setting)
         self.settings_btn.Bind(wx.EVT_BUTTON, self._open_settings)
 
@@ -248,6 +251,12 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             self.log(f"Execution error: {e}\n")
             return 1
 
+    @staticmethod
+    def _format_cmd(cmd) -> str:
+        if sys.platform.startswith("win"):
+            return subprocess.list2cmdline(cmd)
+        return " ".join(shlex.quote(str(part)) for part in cmd)
+
     # Override: do not assign in this simplified window — show placeholder
     def select_part(self, *_):  # noqa: N802 (KiCad naming)
         if not getattr(self, "_deps_ready", False):
@@ -317,7 +326,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self._import_part_via_easyeda(lcsc_id, category, meta)
 
     def _import_part_via_easyeda(self, lcsc_id: str, category: str = "", meta: Optional[Dict] = None):
-        base = Path(__file__).resolve().parent
+        base = Path(PLUGIN_PATH)
         lib_dir = base / "lib"
         scope = self._ensure_library_scope_selected()
         if not scope:
@@ -348,6 +357,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 )
             except Exception as e:
                 wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
+                ok, lib_base = False, self.project_path
             finally:
                 wx.EndBusyCursor()
             
@@ -355,12 +365,15 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 wx.CallAfter(btn.Enable, True)
             
             if ok:
+                display_path = Path(lib_base)
+                location_label = "File" if display_path.suffix.lower() == ".elibz" else "Folder"
                 wx.PostEvent(
-                    self, LogboxAppendEvent(msg=f"Import completed. Files at: {lib_base}\n")
+                    self,
+                    LogboxAppendEvent(msg=f"Import completed. {location_label} at: {display_path}\n"),
                 )
                 wx.CallAfter(
                     wx.MessageBox,
-                    f"Imported {lcsc_id} into project.\nFolder: {lib_base}",
+                    f"Imported {lcsc_id}.\n{location_label}: {display_path}",
                     "Done",
                     wx.ICON_INFORMATION,
                 )
@@ -468,7 +481,13 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         # 1) Use KIPRJMOD when available
         kiprjmod = os.environ.get("KIPRJMOD")
         board = self.pcbnew.GetBoard()
-        project_dir = kiprjmod
+        if kiprjmod:
+            project_dir = kiprjmod
+        else:
+            try:
+                project_dir = os.getcwd()
+            except Exception:
+                project_dir = str(PLUGIN_PATH)
         board_name = os.path.split(board.GetFileName())[1] if board else "board.kicad_pcb"
         schematic_name = f"{board_name.split('.')[0]}.kicad_sch"
         return project_dir, board_name, schematic_name
@@ -635,136 +654,116 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     # Dependency check and interactive installer
     def _check_and_offer_install_deps(self, force_prompt: bool = False):
+        missing = []
         try:
-            # Check runtime deps: pip (easyeda2kicad) only
-            __import__("easyeda2kicad")
-            self._deps_ready = True
+            import requests  # noqa: F401
+        except Exception:
+            missing.append("requests")
+        try:
+            from Crypto.Cipher import AES  # noqa: F401
+        except Exception:
+            try:
+                from Cryptodome.Cipher import AES  # noqa: F401
+            except Exception:
+                missing.append("pycryptodome")
+
+        if missing:
+            self._deps_ready = False
             self._update_select_enabled()
-            return
-        except Exception as e:
-            self.log(f"Error: {e}\n")
-            pass
-
-        msg = (
-            "Required dependency (easyeda2kicad) not found.\n"
-            "Install pip dependencies into the local 'lib/' folder?"
-        )
-        if force_prompt or not self._deps_ready:
-            dlg = wx.MessageDialog(
-                self,
-                message=msg,
-                caption="Install dependencies",
-                style=wx.YES_NO | wx.ICON_QUESTION,
+            lib_dir = Path(PLUGIN_PATH) / "lib"
+            cmd = [
+                self._resolve_python_exe(),
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--target",
+                str(lib_dir),
+                *missing,
+            ]
+            cmd_text = self._format_cmd(cmd)
+            msg = (
+                "Missing dependencies for ComponentLoader import:\n"
+                f"- {', '.join(missing)}\n\n"
+                "Install them now? This will run:\n"
+                f"{cmd_text}\n"
             )
-            res = dlg.ShowModal()
-            dlg.Destroy()
-            if res == wx.ID_YES:
-                # While installing, keep selection disabled
-                self._deps_ready = False
-                self._update_select_enabled()
-                self._install_requirements()
+            prompt = force_prompt or not self._deps_prompted
+            if prompt:
+                self._deps_prompted = True
+                choice = wx.MessageBox(msg, "Dependencies missing", style=wx.YES_NO | wx.ICON_WARNING)
+                if choice == wx.YES:
+                    self._install_requirements_async(missing)
             else:
-                # User declined: lock selection until installed
-                self._deps_ready = False
-                self._update_select_enabled()
-
-    def _install_requirements(self):
-        base = Path(__file__).resolve().parent
-        req = base / "requirements.txt"
-        lib_dir = base / "lib"
-        lib_dir.mkdir(parents=True, exist_ok=True)
-
-        if not req.exists():
-            self.log("requirements.txt not found.\n")
-            wx.MessageBox("requirements.txt not found", "Error", style=wx.ICON_ERROR)
+                try:
+                    self.log(msg + "\n")
+                except Exception:
+                    pass
             return
 
-        # Resolve a real Python interpreter (KiCad on macOS sets sys.executable to the app binary)
-        py_exe = self._resolve_python_exe()
+        self._deps_ready = True
+        self._update_select_enabled()
+
+    def _install_requirements_async(self, packages):
+        if self._deps_installing:
+            return
+        self._deps_installing = True
+
+        def _worker():
+            ok = self._install_requirements(packages)
+
+            def _after():
+                self._deps_installing = False
+                if ok:
+                    try:
+                        self.log("Dependencies installed.\n")
+                    except Exception:
+                        pass
+                    self._check_and_offer_install_deps(force_prompt=False)
+                else:
+                    wx.MessageBox(
+                        "Dependency installation failed. Check the log for details.",
+                        "Dependencies",
+                        wx.ICON_ERROR,
+                    )
+
+            wx.CallAfter(_after)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _install_requirements(self, packages):
+        if not packages:
+            return True
+        lib_dir = Path(PLUGIN_PATH) / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        python_exe = self._resolve_python_exe()
+        env = os.environ.copy()
+        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        env.setdefault("PYTHONNOUSERSITE", "1")
         cmd = [
-            py_exe,
+            python_exe,
             "-m",
             "pip",
             "install",
-            "--disable-pip-version-check",
             "--upgrade",
-            "-r",
-            str(req),
             "--target",
             str(lib_dir),
+            *packages,
         ]
-        self.log(f"Interpreter: {py_exe}\n")
-        self.log(f"Command: {' '.join(cmd)}\n")
-        wx.BeginBusyCursor()
-
-        def _worker():
+        try:
+            self.log(f"Running: {self._format_cmd(cmd)}\n")
+        except Exception:
+            pass
+        rc = self._run_and_stream(cmd, env=env)
+        if rc != 0:
             try:
-                self.log(f"Running: {' '.join(cmd)}\n")
-                ret = self._run_and_stream(cmd)
-            except Exception as e:  # process spawn/read failure
-                self.log(f"Installation error: {e}\n")
-                wx.CallAfter(
-                    wx.MessageBox,
-                    "Failed to launch dependency installation.",
-                    "Error",
-                    wx.ICON_ERROR,
-                )
-                ret = 1
-            finally:
-                if wx.IsBusy():
-                    wx.CallAfter(wx.EndBusyCursor)
-
-            if ret != 0:
-                # Try to bootstrap pip if it was missing
-                try:
-                    self.log("Attempting to install pip via ensurepip...\n")
-                    ensure_cmd = [cmd[0], "-m", "ensurepip", "--upgrade"]
-                    ret2 = self._run_and_stream(ensure_cmd)
-                    if ret2 == 0:
-                        self.log("pip installed. Retrying dependency installation...\n")
-                        ret = self._run_and_stream(cmd)
-                except Exception:
-                    pass
-                if ret != 0:
-                    self.log("pip exited with an error.\n")
-                    wx.CallAfter(
-                        wx.MessageBox,
-                        "Failed to install dependencies. Check network/pip access.",
-                        "Error",
-                        wx.ICON_ERROR,
-                    )
-                    return
-
-            # Successful install path: make lib visible and validate import
-            try:
-                import site
-                import importlib
-                site.addsitedir(str(lib_dir))
-                if str(lib_dir) not in sys.path:
-                    sys.path.insert(0, str(lib_dir))
-                importlib.invalidate_caches()
-                __import__("easyeda2kicad")
-                self._deps_ready = True
-                self.log("Dependencies installed successfully.\n")
-                wx.CallAfter(self._update_select_enabled)
-                wx.CallAfter(
-                    wx.MessageBox,
-                    "Dependencies installed successfully.",
-                    "Done",
-                    wx.ICON_INFORMATION,
-                )
-            except Exception as e:
-                self.log(f"Installation finished, but import failed: {e}.\n")
-                self._deps_ready = False
-                wx.CallAfter(self._update_select_enabled)
-                wx.CallAfter(
-                    wx.MessageBox,
-                    "Installation finished, but import failed. Try restarting KiCad.",
-                    "Warning",
-                    wx.ICON_WARNING,
-                )
-
-        threading.Thread(target=_worker, daemon=True).start()
+                self.log("pip failed, attempting ensurepip...\n")
+            except Exception:
+                pass
+            ensure_cmd = [python_exe, "-m", "ensurepip", "--upgrade"]
+            self._run_and_stream(ensure_cmd, env=env)
+            rc = self._run_and_stream(cmd, env=env)
+        return rc == 0
 
     def _update_select_enabled(self):
         try:
@@ -774,7 +773,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 if self._deps_ready:
                     btn.SetToolTip("")
                 else:
-                    btn.SetToolTip("Dependencies not installed. Install to enable.")
+                    btn.SetToolTip("Dependencies not installed.")
         except Exception:
             pass
 

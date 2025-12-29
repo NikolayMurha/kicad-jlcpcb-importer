@@ -15,12 +15,12 @@ except Exception:  # Pillow is declared in requirements.txt
     ImageOps = None
 
 from .datamodel import PartSelectorDataModel
-from .derive_params import params_for_part  # pylint: disable=import-error
-from .events import AssignPartsEvent, UpdateSetting
-from .helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor
+from ..core.derive_params import params_for_part  # pylint: disable=import-error
+from ..core.events import AssignPartsEvent, UpdateSetting
+from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor
 from .partdetails import PartDetailsDialog
-from .lcsc_api import LCSC_API
-from .library import LibraryState
+from ..core.lcsc_api import LCSC_API
+from ..core.library import LibraryState
 
 class PartSelectorDialog(wx.Dialog):
     """The part selector window."""
@@ -1451,15 +1451,7 @@ class PartSelectorDialog(wx.Dialog):
             if not result or not result.get("success"):
                 raise RuntimeError("part data not found")
             data = result.get("data", {}).get("data", {})
-            picture = data.get("minImage")
-            # if picture:
-                # picture = picture.replace("96x96", "300x300")
-            # else:
-            if not picture:
-                imageId = data.get("productBigImageAccessId")
-                if imageId:
-                    picture = f"https://jlcpcb.com/api/file/downloadByFileSystemAccessId/{imageId}"
-            
+            picture = self._lcsc_api.resolve_part_image_url(data)
             if not picture:
                 raise RuntimeError("no picture url")
             # DEBUG THUMB: disabled noisy logs
@@ -1510,11 +1502,19 @@ class PartSelectorDialog(wx.Dialog):
                         raise RuntimeError("Decode failed")
                     image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
                     bmp = wx.Bitmap(image)
-                except Exception:
+                except Exception as exc:
                     # Last resort placeholder to avoid empty cell
+                    self.logger.warning(
+                        "thumb failed: row=%d lcsc=%s url=%s err=%s",
+                        row_index,
+                        lcsc,
+                        locals().get('picture', None),
+                        exc,
+                    )
                     image = wx.Image(width, height)
                     image.SetRGBRect(wx.Rect(0, 0, width, height), 240, 240, 240)
                     bmp = wx.Bitmap(image)
+                   
         except Exception as exc:  # noqa: BLE001
             # Mark as attempted to avoid retry storms
             with self._thumb_lock:

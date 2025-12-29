@@ -1,9 +1,19 @@
 """Entry point for running the plugin in standalone mode."""
 
+from __future__ import annotations
+
+from pathlib import Path
+import sys
 import wx
 
-from . import standalone_impl
-from .mainwindow import AssignLCSCMainDialog
+if __package__:
+    from .src.core import standalone_impl
+    from .src.ui.mainwindow import AssignLCSCMainDialog
+else:
+    root = Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    from src.core import standalone_impl
+    from src.ui.mainwindow import AssignLCSCMainDialog
 
 if __name__ == "__main__":
     print("starting jlcpcbtools standalone mode...")  # noqa: T201

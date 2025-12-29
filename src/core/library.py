@@ -20,7 +20,7 @@ from .events import (
     MessageEvent,
 )
 from .helpers import PLUGIN_PATH, dict_factory, natural_sort_collation
-from .unzip_parts import unzip_parts
+from ..importers.unzip_parts import unzip_parts
 
 
 class PartsDatabaseInfo(NamedTuple):

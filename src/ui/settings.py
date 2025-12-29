@@ -4,8 +4,8 @@ import logging
 
 import wx  # pylint: disable=import-error
 
-from .events import UpdateSetting
-from .helpers import HighResWxSize, loadBitmapScaled
+from ..core.events import UpdateSetting
+from ..core.helpers import HighResWxSize, loadBitmapScaled
 
 
 class SettingsDialog(wx.Dialog):
@@ -18,7 +18,7 @@ class SettingsDialog(wx.Dialog):
             id=wx.ID_ANY,
             title="JLCPCB importer plugin settings",
             pos=wx.DefaultPosition,
-            size=HighResWxSize(parent.window, wx.Size(520, 220)),
+            size=HighResWxSize(parent.window, wx.Size(520, 260)),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
         )
 
@@ -75,7 +75,21 @@ class SettingsDialog(wx.Dialog):
         # Generation options box
         gen_box = wx.StaticBoxSizer(wx.VERTICAL, self, label="Generated libraries")
 
-        # Library prefix text field (used as base name prefix, e.g. "JLCPCB_")
+        # Library format selection
+        format_row = wx.BoxSizer(wx.HORIZONTAL)
+        format_row.Add(wx.StaticText(self, label="Library format:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.lib_format_ctrl = wx.Choice(
+            self,
+            wx.ID_ANY,
+            choices=["EasyEDA Pro", "KiCad"],
+            name="general_lib_format",
+        )
+        self.lib_format_ctrl.SetToolTip(wx.ToolTip("Select output library format."))
+        self.lib_format_ctrl.Bind(wx.EVT_CHOICE, self.update_settings)
+        format_row.Add(self.lib_format_ctrl, 1, wx.EXPAND)
+        gen_box.Add(format_row, 0, wx.ALL | wx.EXPAND, 5)
+
+        # Library prefix text field (used as base name prefix, e.g. "JLCPCB")
         prefix_row = wx.BoxSizer(wx.HORIZONTAL)
         prefix_row.Add(wx.StaticText(self, label="Library name prefix:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         self.lib_prefix_ctrl = wx.TextCtrl(
@@ -85,7 +99,7 @@ class SettingsDialog(wx.Dialog):
             size=HighResWxSize(self.parent.window, wx.Size(200, -1)),
             name="general_lib_prefix",
         )
-        self.lib_prefix_ctrl.SetToolTip(wx.ToolTip("Prefix prepended to generated library names (e.g. JLCPCB_)."))
+        self.lib_prefix_ctrl.SetToolTip(wx.ToolTip("Prefix prepended to generated library names (e.g. JLCPCB)."))
         self.lib_prefix_ctrl.Bind(wx.EVT_TEXT, self.update_settings)
         prefix_row.Add(self.lib_prefix_ctrl, 1, wx.EXPAND)
         gen_box.Add(prefix_row, 0, wx.ALL | wx.EXPAND, 5)
@@ -118,10 +132,13 @@ class SettingsDialog(wx.Dialog):
             self.parent.settings.get("general", {}).get("library_scope", "project")
         )
         self.update_lib_prefix(
-            self.parent.settings.get("general", {}).get("lib_prefix", "JLCPCB_")
+            self.parent.settings.get("general", {}).get("lib_prefix", "JLCPCB")
         )
         self.update_project_lib_dir(
             self.parent.settings.get("general", {}).get("project_lib_dir", "library")
+        )
+        self.update_lib_format(
+            self.parent.settings.get("general", {}).get("lib_format", "easyeda_pro")
         )
 
     def update_settings(self, event):
@@ -136,6 +153,8 @@ class SettingsDialog(wx.Dialog):
             # Map radio to string for library_scope
             if name == "library_scope":
                 value = "project" if sel == 0 else "system"
+            elif name == "lib_format":
+                value = "easyeda_pro" if sel == 0 else "kicad"
             else:
                 value = sel
         else:
@@ -178,5 +197,21 @@ class SettingsDialog(wx.Dialog):
     def update_project_lib_dir(self, value: str):
         try:
             self.project_lib_dir_ctrl.ChangeValue(str(value) if value is not None else "")
+        except Exception:
+            pass
+
+    def update_lib_format(self, value: str):
+        if isinstance(value, str):
+            key = value.strip().lower()
+            if key in ("easyeda_pro", "easyeda", "easyeda pro"):
+                idx = 0
+            elif key == "kicad":
+                idx = 1
+            else:
+                idx = 0
+        else:
+            idx = int(value) if value in (0, 1) else 0
+        try:
+            self.lib_format_ctrl.SetSelection(idx)
         except Exception:
             pass

@@ -18,12 +18,12 @@ class JLCPCBPlugin(ActionPlugin):
         self.description = "Assign LCSC numbers, search library, update database"
         self.show_toolbar_button = True
         path, _ = os.path.split(os.path.abspath(__file__))
-        self.icon_file_name = os.path.join(path, "jlcpcb_32x32.png")
+        self.icon_file_name = os.path.join(path, "images", "jlcpcb_32x32.png")
         self._pcbnew_frame = None
 
     def Run(self):
         """Overwrite Run."""
-        from .mainwindow import AssignLCSCMainDialog  # local import to avoid import-time errors
+        from .src.ui.mainwindow import AssignLCSCMainDialog  # local import to avoid import-time errors
         dialog = AssignLCSCMainDialog()
         dialog.Center()
         dialog.Show()

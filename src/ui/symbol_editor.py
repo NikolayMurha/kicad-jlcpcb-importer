@@ -8,7 +8,7 @@ import re
 import wx  # type: ignore
 
 try:  # optional UI logger event
-    from .events import LogboxAppendEvent  # type: ignore
+    from ..core.events import LogboxAppendEvent  # type: ignore
 except Exception:  # pragma: no cover
     LogboxAppendEvent = None  # type: ignore
 
@@ -247,6 +247,7 @@ class SymbolEditor:
                 if update_empty_only:
                     cur = self._get_prop_value(self._block, name) or ""
                     if cur.strip() == "":
+                        sval = sval.replace("\n", "")
                         self._block, modified = self._set_prop_value(self._block, name, sval)
                         if modified:
                             changes += 1
@@ -255,6 +256,7 @@ class SymbolEditor:
                 eff = self._ensure_hide_effects(effects) if hidden else (effects or "")
                 extra = (f" {at}" if at else "") + (f" {eff}" if eff else "")
                 safe_val = sval.replace('"', "'")
+                safe_val = safe_val.replace("\n", " ")
                 new_line = f"{indent}(property \"{name}\" \"{safe_val}\"{extra})\n"
                 insert_at = self._block.rfind(')')
                 if insert_at != -1:
