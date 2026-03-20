@@ -5,11 +5,11 @@ import json
 import sys
 import logging
 import subprocess
-import shutil
 import threading
 import shlex
 from pathlib import Path
 import wx
+import wx.dataview as dv
 from typing import Optional, Dict
 
 from .partselector import PartSelectorDialog
@@ -178,6 +178,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         from ..core.events import EVT_UPDATE_SETTING  # local import to avoid cycle
         self.Bind(EVT_UPDATE_SETTING, self._on_update_setting)
         self.settings_btn.Bind(wx.EVT_BUTTON, self._open_settings)
+        # Double-click / Enter on list row triggers import instead of part details
+        self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.select_part)
 
         # Initialize logging to forward to the bottom console
         self._init_logger()
@@ -318,11 +320,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             "description": descr,
             "attributes_json": attributes_json,
         }
-        # Print a message to the UI console
-        try:
-            wx.PostEvent(self, LogboxAppendEvent(msg=f"Meta prepared for import: {meta}\n"))
-        except Exception:
-            pass
         self._import_part_via_easyeda(lcsc_id, category, meta)
 
     def _import_part_via_easyeda(self, lcsc_id: str, category: str = "", meta: Optional[Dict] = None):
@@ -369,21 +366,14 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 location_label = "File" if display_path.suffix.lower() == ".elibz" else "Folder"
                 wx.PostEvent(
                     self,
-                    LogboxAppendEvent(msg=f"Import completed. {location_label} at: {display_path}\n"),
-                )
-                wx.CallAfter(
-                    wx.MessageBox,
-                    f"Imported {lcsc_id}.\n{location_label}: {display_path}",
-                    "Done",
-                    wx.ICON_INFORMATION,
+                    LogboxAppendEvent(
+                        msg=f"*********  IMPORT SUCCESS: {lcsc_id}  *********\n{location_label}: {display_path}\n"
+                    ),
                 )
             else:
-                wx.PostEvent(self, LogboxAppendEvent(msg="Import finished with an error.\n"))
-                wx.CallAfter(
-                    wx.MessageBox,
-                    "Failed to import component. Check the log above.",
-                    "Error",
-                    wx.ICON_ERROR,
+                wx.PostEvent(
+                    self,
+                    LogboxAppendEvent(msg=f"*********  IMPORT FAILED: {lcsc_id}  *********\n"),
                 )
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -465,17 +455,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     # Footprint 3D model rewriting moved to FootprintEditor
     # Nickname prefix resolver moved to EasyedaImporter
 
-    @staticmethod
-    def _safe_remove(path: Path) -> int:
-        # Remove 
-        if path.exists() and path.is_dir():
-            shutil.rmtree(path)
-            return 1
-        if path.exists() and path.is_file():
-            path.unlink()
-            return 1
-        return 0
-
     def _detect_project_context(self):
         """Detect project root and names robustly."""
         # 1) Use KIPRJMOD when available
@@ -493,17 +472,37 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         return project_dir, board_name, schematic_name
 
     # Settings persistence
+    # Per-project settings are stored in jlcpcb_importer.json next to the
+    # .kicad_pro file.  Each subproject (PCB_1/, PCB_2/, …) carries its own
+    # file so settings travel with the project and are tracked by git.
+    # KiCad overwrites .kicad_pro on save, so we never touch it.
+
+    @property
+    def _project_settings_path(self) -> str:
+        """Return path to jlcpcb_importer.json in the current project directory."""
+        return os.path.join(self.project_path, "jlcpcb_importer.json")
+
     def _load_settings(self):
+        # 1) Per-project jlcpcb_importer.json next to .kicad_pro
         try:
-            with open(os.path.join(PLUGIN_PATH, "settings.json"), encoding="utf-8") as j:
-                self.settings = json.load(j)
+            with open(self._project_settings_path, encoding="utf-8") as f:
+                self.settings = json.load(f)
+                return
         except Exception:
-            self.settings = {}
+            pass
+        # 2) Plugin-level jlcpcb_importer.json (shipped default)
+        try:
+            with open(os.path.join(PLUGIN_PATH, "jlcpcb_importer.json"), encoding="utf-8") as f:
+                self.settings = json.load(f)
+                return
+        except Exception:
+            pass
+        self.settings = {}
 
     def _save_settings(self):
         try:
-            with open(os.path.join(PLUGIN_PATH, "settings.json"), "w", encoding="utf-8") as j:
-                json.dump(self.settings, j)
+            with open(self._project_settings_path, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=2)
         except Exception:
             pass
 
@@ -592,22 +591,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception:
             pass
 
-    def _on_download_completed(self, *_):
-        try:
-            if hasattr(self, "update_db_btn") and self.update_db_btn:
-                self.update_db_btn.Enable(True)
-            if getattr(self, "library", None) and getattr(self.library, "state", None) == LibraryState.INITIALIZED:
-                try:
-                    self.refresh_categories()
-                except Exception:
-                    pass
-                try:
-                    self.set_db_ready(True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
     def _on_db_download_completed(self, *_):
         """Enable search and refresh categories when DB is ready."""
         try:
@@ -666,6 +649,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 from Cryptodome.Cipher import AES  # noqa: F401
             except Exception:
                 missing.append("pycryptodome")
+        try:
+            import easyeda2kicad  # noqa: F401
+        except Exception:
+            missing.append("easyeda2kicad")
 
         if missing:
             self._deps_ready = False
@@ -683,7 +670,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             ]
             cmd_text = self._format_cmd(cmd)
             msg = (
-                "Missing dependencies for ComponentLoader import:\n"
+                "Missing dependencies for importer:\n"
                 f"- {', '.join(missing)}\n\n"
                 "Install them now? This will run:\n"
                 f"{cmd_text}\n"
@@ -788,16 +775,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception:
             pass
         return super().Destroy()
-
-    @staticmethod
-    def _sanitize_name(name: str) -> str:
-        """Convert category name to a safe folder name."""
-        try:
-            import re as _re
-            cleaned = _re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-            return cleaned or "Misc"
-        except Exception:
-            return "Misc"
 
 class LogBoxHandler(logging.StreamHandler):
     """Forward Python logging records to the wx UI via events."""

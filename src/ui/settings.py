@@ -1,11 +1,14 @@
 """Contains the settings dialog for the LCSC plugin."""
 
 import logging
+import os
 
 import wx  # pylint: disable=import-error
 
 from ..core.events import UpdateSetting
 from ..core.helpers import HighResWxSize, loadBitmapScaled
+
+_DEFAULT_LIB_PATH = "${KIPRJMOD}/library"
 
 
 class SettingsDialog(wx.Dialog):
@@ -18,7 +21,7 @@ class SettingsDialog(wx.Dialog):
             id=wx.ID_ANY,
             title="JLCPCB importer plugin settings",
             pos=wx.DefaultPosition,
-            size=HighResWxSize(parent.window, wx.Size(520, 260)),
+            size=HighResWxSize(parent.window, wx.Size(520, 280)),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
         )
 
@@ -34,9 +37,8 @@ class SettingsDialog(wx.Dialog):
         entries[2].Set(wx.ACCEL_SHIFT, wx.WXK_ESCAPE, quitid)
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
-        # Layout (storage scope + generation options)
         layout = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Storage scope (Project vs System)
         self.library_scope_box = wx.RadioBox(
             self,
@@ -47,11 +49,10 @@ class SettingsDialog(wx.Dialog):
             style=wx.RA_SPECIFY_ROWS,
             name="general_library_scope",
         )
-        self.library_scope_box.SetToolTip(
-            wx.ToolTip(
-                "Choose whether generated libraries are stored inside the current project (project) or in a shared plugin folder (system)."
-            )
-        )
+        self.library_scope_box.SetToolTip(wx.ToolTip(
+            "Project — libraries are stored inside the project folder.\n"
+            "System — libraries are stored in a shared plugin folder."
+        ))
         self.library_scope_box.Bind(wx.EVT_RADIOBOX, self.update_settings)
 
         storage_scope_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -69,13 +70,12 @@ class SettingsDialog(wx.Dialog):
             5,
         )
         storage_scope_sizer.Add(self.library_scope_box, 100, wx.ALL | wx.EXPAND, 5)
-
         layout.Add(storage_scope_sizer, 0, wx.ALL | wx.EXPAND, 5)
 
         # Generation options box
         gen_box = wx.StaticBoxSizer(wx.VERTICAL, self, label="Generated libraries")
 
-        # Library format selection
+        # Library format
         format_row = wx.BoxSizer(wx.HORIZONTAL)
         format_row.Add(wx.StaticText(self, label="Library format:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         self.lib_format_ctrl = wx.Choice(
@@ -89,7 +89,7 @@ class SettingsDialog(wx.Dialog):
         format_row.Add(self.lib_format_ctrl, 1, wx.EXPAND)
         gen_box.Add(format_row, 0, wx.ALL | wx.EXPAND, 5)
 
-        # Library prefix text field (used as base name prefix, e.g. "JLCPCB")
+        # Library name prefix
         prefix_row = wx.BoxSizer(wx.HORIZONTAL)
         prefix_row.Add(wx.StaticText(self, label="Library name prefix:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         self.lib_prefix_ctrl = wx.TextCtrl(
@@ -104,20 +104,33 @@ class SettingsDialog(wx.Dialog):
         prefix_row.Add(self.lib_prefix_ctrl, 1, wx.EXPAND)
         gen_box.Add(prefix_row, 0, wx.ALL | wx.EXPAND, 5)
 
-        # Project directory name where libraries are placed when scope=project
-        projdir_row = wx.BoxSizer(wx.HORIZONTAL)
-        projdir_row.Add(wx.StaticText(self, label="Project library folder:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        self.project_lib_dir_ctrl = wx.TextCtrl(
+        # Library path (project scope only)
+        # Uses ${KIPRJMOD} so paths survive git checkout on any machine.
+        # Examples:
+        #   ${KIPRJMOD}/library       — default, folder inside the project
+        #   ${KIPRJMOD}/../library    — shared folder one level up (monorepo)
+        lib_path_row = wx.BoxSizer(wx.HORIZONTAL)
+        self._lib_path_label = wx.StaticText(self, label="Library path:")
+        lib_path_row.Add(self._lib_path_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.lib_path_ctrl = wx.TextCtrl(
             self,
             wx.ID_ANY,
             "",
-            size=HighResWxSize(self.parent.window, wx.Size(200, -1)),
-            name="general_project_lib_dir",
+            style=wx.TE_READONLY,
+            name="general_lib_path",
         )
-        self.project_lib_dir_ctrl.SetToolTip(wx.ToolTip("Folder name under the project to store generated libs (default: library)."))
-        self.project_lib_dir_ctrl.Bind(wx.EVT_TEXT, self.update_settings)
-        projdir_row.Add(self.project_lib_dir_ctrl, 1, wx.EXPAND)
-        gen_box.Add(projdir_row, 0, wx.ALL | wx.EXPAND, 5)
+        self.lib_path_ctrl.SetToolTip(wx.ToolTip(
+            "Path to the library folder. Use ${KIPRJMOD} so the path survives git checkout.\n"
+            "Examples:\n"
+            "  ${KIPRJMOD}/library         — folder inside this project (default)\n"
+            "  ${KIPRJMOD}/../library      — shared folder one level up (monorepo)"
+        ))
+        self.lib_path_ctrl.Bind(wx.EVT_TEXT, self.update_settings)
+        self._lib_path_browse_btn = wx.Button(self, wx.ID_ANY, "Browse\u2026", style=wx.BU_EXACTFIT)
+        self._lib_path_browse_btn.Bind(wx.EVT_BUTTON, self._on_browse_lib_path)
+        lib_path_row.Add(self.lib_path_ctrl, 1, wx.EXPAND | wx.RIGHT, 4)
+        lib_path_row.Add(self._lib_path_browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        gen_box.Add(lib_path_row, 0, wx.ALL | wx.EXPAND, 5)
 
         layout.Add(gen_box, 0, wx.ALL | wx.EXPAND, 5)
         self.SetSizer(layout)
@@ -127,30 +140,23 @@ class SettingsDialog(wx.Dialog):
         self.load_settings()
 
     def load_settings(self):
-        # Default to project scope if not set
-        self.update_library_scope(
-            self.parent.settings.get("general", {}).get("library_scope", "project")
-        )
-        self.update_lib_prefix(
-            self.parent.settings.get("general", {}).get("lib_prefix", "JLCPCB")
-        )
-        self.update_project_lib_dir(
-            self.parent.settings.get("general", {}).get("project_lib_dir", "library")
-        )
-        self.update_lib_format(
-            self.parent.settings.get("general", {}).get("lib_format", "easyeda_pro")
-        )
+        general = self.parent.settings.get("general", {})
+        self.update_library_scope(general.get("library_scope", "project"))
+        self.update_lib_prefix(general.get("lib_prefix", "JLCPCB"))
+        self.update_lib_format(general.get("lib_format", "easyeda_pro"))
+        self.update_lib_path(self._resolve_lib_path_setting(general))
+
+    def _resolve_lib_path_setting(self, general: dict) -> str:
+        return str(general.get("lib_path") or "").strip() or _DEFAULT_LIB_PATH
 
     def update_settings(self, event):
         """Update and persist a setting that was changed."""
         obj = event.GetEventObject()
         section, name = obj.GetName().split("_", 1)
-        # Support controls that use GetValue (CheckBox) and GetSelection (RadioBox/Choice)
         if hasattr(obj, "GetValue"):
             value = obj.GetValue()
         elif hasattr(obj, "GetSelection"):
             sel = obj.GetSelection()
-            # Map radio to string for library_scope
             if name == "library_scope":
                 value = "project" if sel == 0 else "system"
             elif name == "lib_format":
@@ -159,26 +165,17 @@ class SettingsDialog(wx.Dialog):
                 value = sel
         else:
             value = None
-        # Reflect new state in UI
         getattr(self, f"update_{name}")(value)
-
         wx.PostEvent(
             self.parent,
-            UpdateSetting(
-                section=section,
-                setting=name,
-                value=value,
-            ),
+            UpdateSetting(section=section, setting=name, value=value),
         )
 
     def quit_dialog(self, *_):
-        """Close this dialog."""
         self.Destroy()
         self.EndModal(0)
 
-    # ----- updater for the only option -----
     def update_library_scope(self, scope):
-        # Accept "project"/"system" or int index
         if isinstance(scope, str):
             idx = 0 if scope.lower() == "project" else 1
         else:
@@ -187,6 +184,13 @@ class SettingsDialog(wx.Dialog):
             self.library_scope_box.SetSelection(idx)
         except Exception:
             pass
+        # Library path is only meaningful for project scope
+        is_project = (idx == 0)
+        for ctrl in (self.lib_path_ctrl, self._lib_path_browse_btn, self._lib_path_label):
+            try:
+                ctrl.Enable(is_project)
+            except Exception:
+                pass
 
     def update_lib_prefix(self, value: str):
         try:
@@ -194,24 +198,50 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             pass
 
-    def update_project_lib_dir(self, value: str):
-        try:
-            self.project_lib_dir_ctrl.ChangeValue(str(value) if value is not None else "")
-        except Exception:
-            pass
-
     def update_lib_format(self, value: str):
         if isinstance(value, str):
             key = value.strip().lower()
-            if key in ("easyeda_pro", "easyeda", "easyeda pro"):
-                idx = 0
-            elif key == "kicad":
-                idx = 1
-            else:
-                idx = 0
+            idx = 1 if key == "kicad" else 0
         else:
             idx = int(value) if value in (0, 1) else 0
         try:
             self.lib_format_ctrl.SetSelection(idx)
         except Exception:
             pass
+
+    def update_lib_path(self, value: str):
+        try:
+            self.lib_path_ctrl.ChangeValue(str(value) if value is not None else "")
+        except Exception:
+            pass
+
+    def _on_browse_lib_path(self, _evt):
+        """Open a directory picker; store result as ${KIPRJMOD}/... path."""
+        from pathlib import Path
+
+        project_path = Path(self.parent.project_path)
+
+        # Resolve current value to a real path for the dialog start directory
+        current = self.lib_path_ctrl.GetValue().strip() or _DEFAULT_LIB_PATH
+        resolved_str = current.replace("${KIPRJMOD}", str(project_path))
+        resolved = Path(resolved_str)
+        start_dir = str(resolved) if resolved.exists() else str(project_path)
+
+        dlg = wx.DirDialog(
+            self,
+            message="Choose library folder",
+            defaultPath=start_dir,
+            style=wx.DD_DEFAULT_STYLE,
+        )
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                chosen = Path(dlg.GetPath())
+                # Express as ${KIPRJMOD}/... using os.path.relpath (handles ..)
+                rel = os.path.relpath(chosen, project_path)
+                result = "${KIPRJMOD}/" + Path(rel).as_posix()
+                # SetValue fires EVT_TEXT → update_settings → saves automatically
+                self.lib_path_ctrl.SetValue(result)
+        finally:
+            dlg.Destroy()
+
+

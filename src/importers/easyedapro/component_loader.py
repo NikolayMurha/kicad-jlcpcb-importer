@@ -206,10 +206,37 @@ class ComponentLoader():
 
             f_data.pop("dataStr", None) # Remove the dataStr field if exists
 
+        # Build sym_uuid -> device name mapping for name patching
+        sym_uuid_to_name = {}
+        for device in fetched_devices.values():
+            sym_uuid = device.get("attributes", {}).get("Symbol")
+            if not sym_uuid:
+                continue
+            name = (
+                device.get("display_title")
+                or device.get("title")
+                or device.get("name")
+                or device.get("product_code")
+                or ""
+            ).strip()
+            if name:
+                sym_uuid_to_name[sym_uuid] = name
+
         # Separate dataStr for symbols
         for s_uuid, s_data in fetched_symbols.items():
             ds = extractDataStr(s_data)
             if ds:
+                # Patch head.name if it is empty or "~"
+                dev_name = sym_uuid_to_name.get(s_uuid, "")
+                if dev_name:
+                    try:
+                        sym_obj = json.loads(ds)
+                        head = sym_obj.get("head") if isinstance(sym_obj, dict) else None
+                        if isinstance(head, dict) and head.get("name", "").strip() in ("", "~"):
+                            head["name"] = dev_name
+                            ds = json.dumps(sym_obj, ensure_ascii=False)
+                    except Exception:
+                        pass
                 symbol_data_str[s_uuid] = ds
 
             s_data.pop("dataStr", None) # Remove the dataStr field if exists

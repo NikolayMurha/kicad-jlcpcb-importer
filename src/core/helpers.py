@@ -99,6 +99,12 @@ def natural_sort_collation(a, b):
     return -1 if natorder.index(a) == 0 else 1
 
 
+def sanitize_lib_name(name: str) -> str:
+    """Convert a string to a safe library/folder name."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
+    return cleaned or "Misc"
+
+
 def dict_factory(cursor, row) -> dict:
     """Row factory that returns a dict."""
     d = {}

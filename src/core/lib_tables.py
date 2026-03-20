@@ -68,9 +68,14 @@ class LibTablesManager:
 
     # --------------- public API ---------------
     def ensure_project_lib_tables(
-        self, out_dir: Path, use_project_relative: bool = True
+        self, out_dir: Path, use_project_relative: bool = True, uri_prefix: str | None = None
     ) -> Tuple[List[Path], List[Path], Path]:
         """Discover generated libraries under out_dir and ensure project lib tables reference them.
+
+        When *uri_prefix* is given (e.g. ``${KIPRJMOD}/../library``) it is used
+        as the base for all URIs, preserving the KiCad variable so paths survive
+        a git checkout on any machine.  *use_project_relative* is ignored in
+        that case.
 
         Returns (sym_files, pretty_dirs, lib_base)
         """
@@ -94,16 +99,21 @@ class LibTablesManager:
 
         changes = 0
 
-        # Add symbol libraries
-        for sym in sym_files:
+        def _uri(path: Path) -> str:
+            if uri_prefix is not None:
+                rel = path.resolve().relative_to(lib_dir.resolve()).as_posix()
+                return f"{uri_prefix.rstrip('/')}/{rel}"
             if use_project_relative:
                 try:
-                    rel = sym.resolve().relative_to(project_dir.resolve()).as_posix()
+                    rel = path.resolve().relative_to(project_dir.resolve()).as_posix()
+                    return f"${{KIPRJMOD}}/{rel}"
                 except Exception:
-                    rel = sym.resolve().as_posix()
-                uri = f"${{KIPRJMOD}}/{rel}"
-            else:
-                uri = sym.resolve().as_posix()
+                    pass
+            return path.resolve().as_posix()
+
+        # Add symbol libraries
+        for sym in sym_files:
+            uri = _uri(sym)
             name = self._unique_name(sym.stem, sym_content)
             if self._ensure_entry(sym_tbl, "sym", name, uri):
                 self._log(f"Added symbol lib: {name} -> {uri}\n")
@@ -112,28 +122,15 @@ class LibTablesManager:
 
         # Add footprint libraries
         for pd in pretty_dirs:
-            if use_project_relative:
-                try:
-                    rel = pd.resolve().relative_to(project_dir.resolve()).as_posix()
-                except Exception:
-                    rel = pd.resolve().as_posix()
-                uri = f"${{KIPRJMOD}}/{rel}"
-            else:
-                uri = pd.resolve().as_posix()
+            uri = _uri(pd)
             name = self._unique_name(pd.stem, fp_content)
             if self._ensure_entry(fp_tbl, "fp", name, uri):
                 self._log(f"Added footprint lib: {name} -> {uri}\n")
                 fp_content = self._read(fp_tbl)
                 changes += 1
+
         for elibz in elibz_files:
-            if use_project_relative:
-                try:
-                    rel = elibz.resolve().relative_to(project_dir.resolve()).as_posix()
-                except Exception:
-                    rel = elibz.resolve().as_posix()
-                uri = f"${{KIPRJMOD}}/{rel}"
-            else:
-                uri = elibz.resolve().as_posix()
+            uri = _uri(elibz)
 
             sym_name = self._unique_name(elibz.stem, sym_content)
             if self._ensure_entry(sym_tbl, "sym", sym_name, uri, lib_type="EasyEDA (JLCEDA) Pro"):

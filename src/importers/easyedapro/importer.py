@@ -82,6 +82,31 @@ class EasyedaProImporter:
                 ...
         return 0
 
+    def _resolve_lib_root(self, general: dict) -> tuple[Path, str]:
+        """Return (filesystem_path, uri_prefix) for the library root.
+
+        The setting is stored as a ``${KIPRJMOD}``-relative path so it
+        survives git checkout on any machine:
+
+            ${KIPRJMOD}/library       → <project>/library/
+            ${KIPRJMOD}/../library    → <repo>/library/    (monorepo shared)
+
+        Returns:
+            fs_path   — absolute filesystem path (${KIPRJMOD} substituted)
+            uri_prefix — the raw setting value, kept as-is for lib table URIs
+        """
+        raw = str(general.get("lib_path") or "").strip() or "${KIPRJMOD}/library"
+
+        uri_prefix = raw.rstrip("/")
+
+        fs_str = raw.replace("${KIPRJMOD}", str(self.project_path))
+        p = Path(fs_str)
+        if not p.is_absolute():
+            p = (self.project_path / p).resolve()
+        else:
+            p = p.resolve()
+        return p, uri_prefix
+
     def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, str, Path]:
 
         # Resolve generation settings from parent (with defaults)
@@ -92,9 +117,7 @@ class EasyedaProImporter:
             general = {}
         lib_prefix = str(general.get("lib_prefix", "JLCPCB")).strip()
         lib_prefix = lib_prefix.rstrip("_") or "JLCPCB"
-        project_lib_dir = str(general.get("project_lib_dir", "library")).strip() or "library"
 
-        # Legacy note: this value used to be the base name for generated files/folders.
         single_name = str(general.get("single_library_name", "")).strip()
         use_single = bool(general.get("single_library", True))
         if use_single:
@@ -103,33 +126,32 @@ class EasyedaProImporter:
             target_output_name = self._sanitize(single_name)
         else:
             target_output_name = f"{lib_prefix}_{category}"
-        
+
         if self.is_system_scope:
             third_party = os.environ.get("KICAD9_3RD_PARTY")
             if third_party and isinstance(third_party, str) and third_party.strip():
                 base_path = Path(third_party)
             else:
                 base_path = Path(PLUGIN_PATH) / "libraries"
-            
+
             plugin_folder = Path(PLUGIN_PATH).resolve().name
             symbols_path = base_path / "symbols" / plugin_folder / target_output_name
             footprints_path = base_path / "footprints" / plugin_folder / target_output_name
             models_3d_path = base_path / "3dmodels" / plugin_folder / target_output_name
-            
+
             for folder in ("symbols", "footprints", "3dmodels"):
                 (base_path / folder / plugin_folder).mkdir(parents=True, exist_ok=True)
             lib_root = base_path / "symbols" / plugin_folder
 
         else:
-            lib_root = self.project_path / project_lib_dir
+            lib_root, uri_prefix = self._resolve_lib_root(general)
             lib_root.mkdir(parents=True, exist_ok=True)
-            models_3d_path = self.project_path / MODELS_DIR
             if use_single:
                 symbols_path = footprints_path = lib_root
             else:
                 symbols_path = footprints_path = lib_root / target_output_name
-        # EasyEDA uses a fixed project-relative 3D models path.
-        models_3d_path = self.project_path / MODELS_DIR
+            models_3d_path = lib_root / MODELS_DIR
+
         return symbols_path, footprints_path, models_3d_path, target_output_name, lib_root
 
     def _component_loader_progress(self, current: int, total: int) -> None:
@@ -167,9 +189,11 @@ class EasyedaProImporter:
             loader.downloadAll([lcsc_id])
             if not self.is_system_scope:
                 try:
-                    tables_root = lib_root
+                    _, uri_prefix = self._resolve_lib_root(
+                        (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
+                    )
                     LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
-                        tables_root
+                        lib_root, uri_prefix=uri_prefix
                     )
                 except Exception as exc:
                     self.log(f"Library table update failed: {exc}\n")
