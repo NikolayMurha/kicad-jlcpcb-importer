@@ -2,8 +2,9 @@
   "general": {
     "library_scope": "project",
     "lib_format": "easyeda_pro",
+    "group_by_category": true,
     "lib_prefix": "JLCPCB",
-    "lib_path": "${KIPRJMOD}/library"
+    "lib_path": "library"
   },
   "partselector": {
     "advanced_visible": false

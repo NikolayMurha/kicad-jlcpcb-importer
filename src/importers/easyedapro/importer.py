@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import os
-import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import wx  # type: ignore
 from ...core.events import LogboxAppendEvent
 
-from ...core.helpers import PLUGIN_PATH
+from ...core.helpers import PLUGIN_PATH, sanitize_lib_name
+from ...core.lib_paths import resolve_lib_root, resolve_library_base_name, resolve_target_library_name
 from ...core.lib_tables import LibTablesManager
+from ...core.shared_lib import (
+    ensure_project_legacy_models_link,
+    ensure_project_table_links,
+    ensure_shared_meta,
+)
 from .component_loader import ComponentLoader, MODELS_DIR
 
 
@@ -32,81 +37,6 @@ class EasyedaProImporter:
         self.scope = str(scope).lower()
         self.lib_dir = Path(lib_dir) if lib_dir is not None else (Path(PLUGIN_PATH) / "lib")
 
-    def resolve_nickname_prefix(self) -> str:
-        """Resolve KiCad 3rd-party library nickname prefix."""
-        # 1) KiCad settings (best effort)
-        try:
-            try:
-                import pcbnew as _kicad_pcbnew  # type: ignore
-            except Exception as e:
-                self.log(f"resolve_nickname_prefix: pcbnew import failed: {e}\n")
-                _kicad_pcbnew = None
-            base = None
-            if _kicad_pcbnew is not None:
-                try:
-                    base = _kicad_pcbnew.SETTINGS_MANAGER.GetUserSettingsPath()
-                except Exception as e:
-                    self.log(f"resolve_nickname_prefix: cannot get user settings path: {e}\n")
-                    base = None
-            if base:
-                settings_path = Path(base) / "kicad.json"
-                if settings_path.exists():
-                    try:
-                        data = json.loads(settings_path.read_text(encoding="utf-8"))
-                        if isinstance(data, dict):
-                            pcm = data.get("pcm", {}) or {}
-                            prefix = pcm.get("lib_prefix")
-                            if isinstance(prefix, str) and prefix.strip():
-                                return prefix.strip()
-                    except Exception as e:
-                        self.log(f"resolve_nickname_prefix: failed to parse kicad.json: {e}\n")
-        except Exception as e:
-            self.log(f"resolve_nickname_prefix: unexpected error: {e}\n")
-
-        return "PCM_"
-
-    @staticmethod
-    def _safe_remove(path: Path) -> int:
-        try:
-            if path.exists() and path.is_dir():
-                import shutil
-                shutil.rmtree(path)
-                return 1
-            if path.exists() and path.is_file():
-                path.unlink()
-                return 1
-        except Exception as e:
-            try:
-                print(f"safe_remove failed for {path}: {e}")
-            except Exception:
-                ...
-        return 0
-
-    def _resolve_lib_root(self, general: dict) -> tuple[Path, str]:
-        """Return (filesystem_path, uri_prefix) for the library root.
-
-        The setting is stored as a ``${KIPRJMOD}``-relative path so it
-        survives git checkout on any machine:
-
-            ${KIPRJMOD}/library       → <project>/library/
-            ${KIPRJMOD}/../library    → <repo>/library/    (monorepo shared)
-
-        Returns:
-            fs_path   — absolute filesystem path (${KIPRJMOD} substituted)
-            uri_prefix — the raw setting value, kept as-is for lib table URIs
-        """
-        raw = str(general.get("lib_path") or "").strip() or "${KIPRJMOD}/library"
-
-        uri_prefix = raw.rstrip("/")
-
-        fs_str = raw.replace("${KIPRJMOD}", str(self.project_path))
-        p = Path(fs_str)
-        if not p.is_absolute():
-            p = (self.project_path / p).resolve()
-        else:
-            p = p.resolve()
-        return p, uri_prefix
-
     def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, str, Path]:
 
         # Resolve generation settings from parent (with defaults)
@@ -115,17 +45,12 @@ class EasyedaProImporter:
             general = settings.get("general", {}) or {}
         except Exception:
             general = {}
-        lib_prefix = str(general.get("lib_prefix", "JLCPCB")).strip()
-        lib_prefix = lib_prefix.rstrip("_") or "JLCPCB"
-
-        single_name = str(general.get("single_library_name", "")).strip()
-        use_single = bool(general.get("single_library", True))
-        if use_single:
-            if not single_name:
-                single_name = lib_prefix
-            target_output_name = self._sanitize(single_name)
-        else:
-            target_output_name = f"{lib_prefix}_{category}"
+        target_output_name = resolve_target_library_name(
+            general,
+            category,
+            sanitize=sanitize_lib_name,
+            project_path=self.project_path,
+        )
 
         if self.is_system_scope:
             third_party = os.environ.get("KICAD9_3RD_PARTY")
@@ -135,22 +60,21 @@ class EasyedaProImporter:
                 base_path = Path(PLUGIN_PATH) / "libraries"
 
             plugin_folder = Path(PLUGIN_PATH).resolve().name
-            symbols_path = base_path / "symbols" / plugin_folder / target_output_name
-            footprints_path = base_path / "footprints" / plugin_folder / target_output_name
-            models_3d_path = base_path / "3dmodels" / plugin_folder / target_output_name
+            symbols_path = base_path / "symbols" / plugin_folder
+            footprints_path = base_path / "footprints" / plugin_folder
+            models_3d_path = base_path / "3dmodels" / plugin_folder
 
             for folder in ("symbols", "footprints", "3dmodels"):
                 (base_path / folder / plugin_folder).mkdir(parents=True, exist_ok=True)
             lib_root = base_path / "symbols" / plugin_folder
 
         else:
-            lib_root, uri_prefix = self._resolve_lib_root(general)
+            lib_root, _ = resolve_lib_root(general, self.project_path)
             lib_root.mkdir(parents=True, exist_ok=True)
-            if use_single:
-                symbols_path = footprints_path = lib_root
-            else:
-                symbols_path = footprints_path = lib_root / target_output_name
-            models_3d_path = lib_root / MODELS_DIR
+            symbols_path = footprints_path = lib_root
+            # KiCad's built-in EasyEDA Pro library reader generates model paths as
+            # ${KIPRJMOD}/EASYEDA_MODELS/<name>.step, so we store models there.
+            models_3d_path = self.project_path / "EASYEDA_MODELS"
 
         return symbols_path, footprints_path, models_3d_path, target_output_name, lib_root
 
@@ -172,7 +96,7 @@ class EasyedaProImporter:
         category: str,
         meta: Optional[Dict] = None,
     ) -> Tuple[bool, Path]:
-        category = self._sanitize(category or "Misc")
+        category = sanitize_lib_name(category or "Misc")
         symbols_path, _footprints_path, models_3d_path, target_name, lib_root = self._compute_outputs(category)
         target_path = symbols_path
         elibz_path = target_path / f"{target_name}.elibz"
@@ -189,11 +113,29 @@ class EasyedaProImporter:
             loader.downloadAll([lcsc_id])
             if not self.is_system_scope:
                 try:
-                    _, uri_prefix = self._resolve_lib_root(
-                        (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
-                    )
-                    LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
-                        lib_root, uri_prefix=uri_prefix
+                    general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
+                    if self.is_shared_scope:
+                        default_name = resolve_library_base_name(
+                            general,
+                            project_path=self.project_path,
+                        )
+                        _shared_root, shared_uri_prefix = resolve_lib_root(general, self.project_path)
+                        ensure_shared_meta(lib_root, default_name, log=self.log)
+                        LibTablesManager(lib_root, log=self.log).ensure_project_lib_tables(
+                            lib_root,
+                            use_project_relative=False,
+                            uri_prefix=shared_uri_prefix,
+                        )
+                        ensure_project_table_links(self.project_path, lib_root, log=self.log)
+                    else:
+                        _, uri_prefix = resolve_lib_root(general, self.project_path)
+                        LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
+                            lib_root, uri_prefix=uri_prefix
+                        )
+                    ensure_project_legacy_models_link(
+                        self.project_path,
+                        models_3d_path,
+                        log=self.log,
                     )
                 except Exception as exc:
                     self.log(f"Library table update failed: {exc}\n")
@@ -206,16 +148,11 @@ class EasyedaProImporter:
     @property
     def is_system_scope(self) -> bool:
         return self.scope == "system"
-    
-    @staticmethod
-    def _sanitize(name: str) -> str:
-        try:
-            import re
-            cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-            return cleaned or "Misc"
-        except Exception:
-            return "Misc"
-        
+
+    @property
+    def is_shared_scope(self) -> bool:
+        return self.scope == "shared"
+
     def log(self, msg: str) -> None:
         try:
             if self.parent_window is not None:

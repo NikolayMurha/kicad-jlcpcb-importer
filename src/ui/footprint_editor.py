@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 from typing import Optional, Callable
@@ -9,7 +10,7 @@ from typing import Optional, Callable
 
 class FootprintEditor:
     """Editor for footprint files under a search root.
-    - Provides rewriting of absolute 3D model paths inside the project to ${KIPRJMOD}-relative
+    - Provides rewriting of absolute 3D model paths to ${KIPRJMOD}-relative
     """
 
     def __init__(self, project_dir: Path | str, log: Optional[Callable[[str], None]] = None):
@@ -37,7 +38,7 @@ class FootprintEditor:
 
     def relativize_3d_model_paths(self, search_root: Path | str) -> int:
         """Scan `.kicad_mod`/`.mod` under search_root and rewrite absolute 3D model paths
-        that point inside the project directory to `${KIPRJMOD}`-relative paths.
+        to `${KIPRJMOD}`-relative paths.
 
         Returns the number of replacements made.
         """
@@ -69,7 +70,7 @@ class FootprintEditor:
                 if not self._is_abs(norm):
                     return m.group(0)
                 try:
-                    rel = Path(norm).resolve().relative_to(self.project_dir)
+                    rel = Path(os.path.relpath(Path(norm).resolve(), self.project_dir))
                 except Exception:
                     return m.group(0)
                 newp = f"${{KIPRJMOD}}/{rel.as_posix()}"
@@ -89,6 +90,40 @@ class FootprintEditor:
                     pass
 
         return total
+
+    @staticmethod
+    def set_3d_model_offset(
+        footprint_path: Path | str,
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
+    ) -> bool:
+        """Set (offset (xyz X Y Z)) in a single .kicad_mod file.
+
+        easyeda2kicad writes raw EasyEDA canvas coordinates as the model offset,
+        which displaces the 3D model far from the footprint. Pass the real
+        translation from the EasyEDA Pro device API (converted to mm), or leave
+        defaults to zero out the offset when no transform data is available.
+
+        Returns True if the file was modified.
+        """
+        fp = Path(footprint_path)
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception:
+            return False
+
+        pattern = re.compile(
+            r"\(offset\s+\(xyz\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s*\)\)"
+        )
+        new_text = pattern.sub(f"(offset (xyz {x:.6f} {y:.6f} {z:.6f}))", text)
+        if new_text == text:
+            return False
+        try:
+            fp.write_text(new_text, encoding="utf-8")
+            return True
+        except Exception:
+            return False
 
     def rewrite_system_3d_model_paths(self, footprints_base: Path | str, models3d_base: Path | str) -> int:
         """In system-wide layout, fix absolute model paths that wrongly point under 'footprints'.

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
+
+from .sym_lib_reader import resolve_uri
 
 
 class LibTablesManager:
@@ -28,8 +31,8 @@ class LibTablesManager:
     @staticmethod
     def _init_table(kind: str) -> str:
         if kind == "sym":
-            return "(sym_lib_table\r\n  (version 7))\r\n"
-        return "(fp_lib_table\r\n  (version 7))\r\n"
+            return "(sym_lib_table\n  (version 7))\n"
+        return "(fp_lib_table\n  (version 7))\n"
 
     def _ensure_entry(
         self,
@@ -66,9 +69,116 @@ class LibTablesManager:
             return f"{base}_{i}"
         return base
 
+    @staticmethod
+    def _iter_lib_blocks(content: str) -> List[Tuple[int, int, str]]:
+        blocks: List[Tuple[int, int, str]] = []
+        i = 0
+        length = len(content)
+        while i < length:
+            if content[i] == "(" and content[i + 1 : i + 5] == "lib ":
+                start = i
+                depth = 0
+                j = i
+                while j < length:
+                    if content[j] == "(":
+                        depth += 1
+                    elif content[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            blocks.append((start, j + 1, content[start : j + 1]))
+                            i = j
+                            break
+                    j += 1
+            i += 1
+        return blocks
+
+    @staticmethod
+    def _parse_lib_fields(block: str) -> Optional[Tuple[str, str, str]]:
+        nm = re.search(r'\(name\s+"([^"]+)"\)', block)
+        tp = re.search(r'\(type\s+"([^"]+)"\)', block)
+        ur = re.search(r'\(uri\s+"([^"]+)"\)', block)
+        if nm and tp and ur:
+            return nm.group(1), tp.group(1), ur.group(1)
+        return None
+
+    @staticmethod
+    def _has_uri_scheme(value: str) -> bool:
+        return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", str(value or "").strip()))
+
+    @staticmethod
+    def _contains_unresolved_var(uri: str) -> bool:
+        return "${" in uri or "$ENV{" in uri or "$(" in uri
+
+    def _uri_points_to_existing_path(
+        self,
+        uri: str,
+        table_dir: Path,
+        project_path: Optional[Path],
+    ) -> bool:
+        try:
+            resolved = resolve_uri(uri, project_path=project_path, table_dir=table_dir)
+        except Exception:
+            resolved = uri
+
+        if self._has_uri_scheme(resolved):
+            return True
+        if self._contains_unresolved_var(resolved):
+            return True
+
+        p = Path(resolved)
+        if not p.is_absolute():
+            p = (table_dir / p).resolve()
+        return p.exists()
+
+    def _prune_invalid_entries_from_table(
+        self,
+        table_path: Path,
+        table_kind: str,
+        project_path: Optional[Path],
+    ) -> int:
+        content = self._read(table_path)
+        if not content:
+            return 0
+
+        blocks = self._iter_lib_blocks(content)
+        if not blocks:
+            return 0
+
+        kept_parts: List[str] = []
+        cursor = 0
+        removed = 0
+        for start, end, block in blocks:
+            keep = True
+            fields = self._parse_lib_fields(block)
+            if fields is not None:
+                name, _lib_type, uri = fields
+                if not self._uri_points_to_existing_path(
+                    uri,
+                    table_dir=table_path.parent,
+                    project_path=project_path,
+                ):
+                    keep = False
+                    removed += 1
+                    self._log(f"Removed invalid {table_kind} entry: {name} -> {uri}\n")
+
+            if keep:
+                kept_parts.append(content[cursor:end])
+            else:
+                kept_parts.append(content[cursor:start])
+            cursor = end
+
+        kept_parts.append(content[cursor:])
+        if removed > 0:
+            self._write(table_path, "".join(kept_parts))
+        return removed
+
     # --------------- public API ---------------
     def ensure_project_lib_tables(
-        self, out_dir: Path, use_project_relative: bool = True, uri_prefix: str | None = None
+        self,
+        out_dir: Path,
+        use_project_relative: bool = True,
+        uri_prefix: str | None = None,
+        use_lib_relative_uri: bool = False,
     ) -> Tuple[List[Path], List[Path], Path]:
         """Discover generated libraries under out_dir and ensure project lib tables reference them.
 
@@ -100,6 +210,9 @@ class LibTablesManager:
         changes = 0
 
         def _uri(path: Path) -> str:
+            if use_lib_relative_uri:
+                rel = path.resolve().relative_to(lib_dir.resolve()).as_posix()
+                return rel
             if uri_prefix is not None:
                 rel = path.resolve().relative_to(lib_dir.resolve()).as_posix()
                 return f"{uri_prefix.rstrip('/')}/{rel}"
@@ -131,14 +244,15 @@ class LibTablesManager:
 
         for elibz in elibz_files:
             uri = _uri(elibz)
+            elibz_name = f"{elibz.stem} (elibz)"
 
-            sym_name = self._unique_name(elibz.stem, sym_content)
+            sym_name = self._unique_name(elibz_name, sym_content)
             if self._ensure_entry(sym_tbl, "sym", sym_name, uri, lib_type="EasyEDA (JLCEDA) Pro"):
                 self._log(f"Added elibz sym lib: {sym_name} -> {uri}\n")
                 sym_content = self._read(sym_tbl)
                 changes += 1
 
-            fp_name = self._unique_name(elibz.stem, fp_content)
+            fp_name = self._unique_name(elibz_name, fp_content)
             if self._ensure_entry(fp_tbl, "fp", fp_name, uri, lib_type="EasyEDA / JLCEDA Pro"):
                 self._log(f"Added elibz fp lib: {fp_name} -> {uri}\n")
                 fp_content = self._read(fp_tbl)
@@ -156,3 +270,19 @@ class LibTablesManager:
                 )
 
         return sym_files, pretty_dirs, lib_base
+
+    def prune_invalid_table_paths(
+        self,
+        project_path: Optional[Path] = None,
+    ) -> Tuple[int, int]:
+        """Remove table entries that point to missing filesystem paths.
+
+        Returns ``(removed_sym_entries, removed_fp_entries)``.
+        """
+        sym_tbl = self.project_dir / "sym-lib-table"
+        fp_tbl = self.project_dir / "fp-lib-table"
+        proj = Path(project_path) if project_path is not None else self.project_dir
+
+        removed_sym = self._prune_invalid_entries_from_table(sym_tbl, "sym-lib-table", proj)
+        removed_fp = self._prune_invalid_entries_from_table(fp_tbl, "fp-lib-table", proj)
+        return removed_sym, removed_fp

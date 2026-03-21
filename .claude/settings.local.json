@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile src/core/lib_paths.py src/core/lib_tables.py src/core/shared_lib.py src/core/sym_lib_reader.py)",
+      "Bash(find /Users/nikolay/Projects/LegitForce/kicad-lcsc/kicad-jlcpcb-importer -name *.kicad_mod -type f)"
+    ]
+  }
+}

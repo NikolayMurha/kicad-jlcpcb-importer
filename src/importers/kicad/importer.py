@@ -8,9 +8,17 @@ from typing import Dict, Optional, Tuple
 import wx  # type: ignore
 from ...core.events import LogboxAppendEvent
 from ...core.helpers import PLUGIN_PATH, sanitize_lib_name
+from ...core.lib_paths import resolve_lib_root, resolve_library_base_name, resolve_target_library_name
 from ...core.lib_tables import LibTablesManager
+from ...core.shared_lib import (
+    ensure_project_legacy_models_link,
+    ensure_project_table_links,
+    ensure_shared_meta,
+)
 from ...ui.footprint_editor import FootprintEditor
+from ..step_utils import fixup_step_model
 
+from ...core.lcsc_api import LCSC_API
 from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
 from easyeda2kicad.easyeda.easyeda_importer import (
     Easyeda3dModelImporter,
@@ -56,7 +64,11 @@ class KicadImporter:
         symbols_root, footprints_root, models_root, lib_name, lib_root = self._compute_outputs(category)
         symbol_lib_path = symbols_root / f"{lib_name}.kicad_sym"
         footprint_dir = footprints_root / f"{lib_name}.pretty"
-        models_dir = models_root / f"{lib_name}.3dshapes"
+        models_dir = (
+            models_root / f"{lib_name}.3dshapes"
+            if self.is_system_scope
+            else (models_root / "3dmodels")
+        )
 
         try:
             self.log(f"Running easyeda2kicad for {lcsc_id} into {lib_root}\n")
@@ -105,14 +117,41 @@ class KicadImporter:
                 footprint_full_path=str(footprint_full_path),
                 model_3d_path=model_3d_path,
             )
+            tx, ty, tz = self._fetch_model_offset(lcsc_id)
+            FootprintEditor.set_3d_model_offset(footprint_full_path, tx, ty, tz)
 
             try:
-                exporter = Exporter3dModelKicad(
-                    model_3d=Easyeda3dModelImporter(
-                        easyeda_cp_cad_data=cad_data, download_raw_3d_model=True
-                    ).output
-                )
-                exporter.export(lib_path=str(models_root / lib_name))
+                model = Easyeda3dModelImporter(
+                    easyeda_cp_cad_data=cad_data, download_raw_3d_model=True
+                ).output
+                exporter = Exporter3dModelKicad(model_3d=model)
+                if self.is_system_scope:
+                    exporter.export(lib_path=str(models_root / lib_name))
+                else:
+                    if exporter.output:
+                        (models_dir / f"{exporter.output.name}.wrl").write_text(
+                            exporter.output.raw_wrl, encoding="utf-8"
+                        )
+                    if exporter.output_step and exporter.output:
+                        step_path = models_dir / f"{exporter.output.name}.step"
+                        step_path.write_bytes(exporter.output_step)
+                        try:
+                            fixup_step_model(step_path)
+                        except Exception as exc:
+                            self.log(f"3D model fixup skipped: {exc}\n")
+                    elif exporter.output_step and model:
+                        step_path = models_dir / f"{model.name}.step"
+                        step_path.write_bytes(exporter.output_step)
+                        try:
+                            fixup_step_model(step_path)
+                        except Exception as exc:
+                            self.log(f"3D model fixup skipped: {exc}\n")
+                        try:
+                            content = footprint_full_path.read_text(encoding="utf-8", errors="replace")
+                            content = content.replace(".wrl\"", ".step\"")
+                            footprint_full_path.write_text(content, encoding="utf-8")
+                        except Exception:
+                            pass
             except Exception as exc:
                 self.log(f"3D model download skipped: {exc}\n")
 
@@ -123,11 +162,35 @@ class KicadImporter:
                 editor.rewrite_system_3d_model_paths(footprints_base, models_base)
             else:
                 try:
-                    _, uri_prefix = self._resolve_lib_root(
-                        (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
+                    FootprintEditor(self.project_path, log=self.log).relativize_3d_model_paths(
+                        footprint_dir
                     )
-                    LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
-                        lib_root, uri_prefix=uri_prefix
+                except Exception:
+                    pass
+                try:
+                    general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
+                    if self.is_shared_scope:
+                        default_name = resolve_library_base_name(
+                            general,
+                            project_path=self.project_path,
+                        )
+                        _shared_root, shared_uri_prefix = resolve_lib_root(general, self.project_path)
+                        ensure_shared_meta(lib_root, default_name, log=self.log)
+                        LibTablesManager(lib_root, log=self.log).ensure_project_lib_tables(
+                            lib_root,
+                            use_project_relative=False,
+                            uri_prefix=shared_uri_prefix,
+                        )
+                        ensure_project_table_links(self.project_path, lib_root, log=self.log)
+                    else:
+                        _, uri_prefix = resolve_lib_root(general, self.project_path)
+                        LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
+                            lib_root, uri_prefix=uri_prefix
+                        )
+                    ensure_project_legacy_models_link(
+                        self.project_path,
+                        models_root / "3dmodels",
+                        log=self.log,
                     )
                 except Exception as exc:
                     self.log(f"Library table update failed: {exc}\n")
@@ -142,30 +205,9 @@ class KicadImporter:
     def is_system_scope(self) -> bool:
         return self.scope == "system"
 
-    def _resolve_lib_root(self, general: dict) -> tuple[Path, str]:
-        """Return (filesystem_path, uri_prefix) for the library root.
-
-        The setting is stored as a ``${KIPRJMOD}``-relative path so it
-        survives git checkout on any machine:
-
-            ${KIPRJMOD}/library       → <project>/library/
-            ${KIPRJMOD}/../library    → <repo>/library/    (monorepo shared)
-
-        Returns:
-            fs_path    — absolute filesystem path (${KIPRJMOD} substituted)
-            uri_prefix — the raw setting value, kept as-is for lib table URIs
-        """
-        raw = str(general.get("lib_path") or "").strip() or "${KIPRJMOD}/library"
-
-        uri_prefix = raw.rstrip("/")
-
-        fs_str = raw.replace("${KIPRJMOD}", str(self.project_path))
-        p = Path(fs_str)
-        if not p.is_absolute():
-            p = (self.project_path / p).resolve()
-        else:
-            p = p.resolve()
-        return p, uri_prefix
+    @property
+    def is_shared_scope(self) -> bool:
+        return self.scope == "shared"
 
     def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, str, Path]:
         try:
@@ -174,17 +216,12 @@ class KicadImporter:
         except Exception:
             general = {}
 
-        lib_prefix = str(general.get("lib_prefix", "JLCPCB")).strip()
-        lib_prefix = lib_prefix.rstrip("_") or "JLCPCB"
-
-        single_name = str(general.get("single_library_name", "")).strip()
-        use_single = bool(general.get("single_library", True))
-        if use_single:
-            if not single_name:
-                single_name = lib_prefix
-            lib_name = sanitize_lib_name(single_name)
-        else:
-            lib_name = f"{lib_prefix}_{category}"
+        lib_name = resolve_target_library_name(
+            general,
+            category,
+            sanitize=sanitize_lib_name,
+            project_path=self.project_path,
+        )
 
         if self.is_system_scope:
             third_party = os.environ.get("KICAD9_3RD_PARTY")
@@ -201,7 +238,7 @@ class KicadImporter:
                 folder.mkdir(parents=True, exist_ok=True)
             lib_root = symbols_root
         else:
-            lib_root, uri_prefix = self._resolve_lib_root(general)
+            lib_root, _uri_prefix = resolve_lib_root(general, self.project_path)
             lib_root.mkdir(parents=True, exist_ok=True)
             symbols_root = footprints_root = models_root = lib_root
 
@@ -211,10 +248,10 @@ class KicadImporter:
         if self.is_system_scope:
             return models_dir.resolve().as_posix()
         try:
-            rel = models_dir.resolve().relative_to(self.project_path.resolve()).as_posix()
-            return f"${{KIPRJMOD}}/{rel}"
+            rel = os.path.relpath(models_dir.resolve(), self.project_path.resolve())
+            return "${KIPRJMOD}/" + Path(rel).as_posix()
         except Exception:
-            return models_dir.resolve().as_posix()
+            return "${KIPRJMOD}/3dmodels"
 
     def _ensure_symbol_lib(self, path: Path) -> None:
         if path.exists():
@@ -226,6 +263,35 @@ class KicadImporter:
             ")\n"
         )
         path.write_text(header, encoding="utf-8")
+
+    def _fetch_model_offset(self, lcsc_id: str) -> tuple[float, float, float]:
+        """Fetch 3D model translation from EasyEDA Pro device API.
+
+        Returns (x, y, z) in mm — indices [6,7,8] of the '3D Model Transform'
+        attribute (comma-separated mils). Falls back to (0, 0, 0) on any error.
+        """
+        try:
+            api = LCSC_API()
+            result = api.easyeda_search_by_codes([lcsc_id])
+            if not result.get("success") or not result.get("result"):
+                return (0.0, 0.0, 0.0)
+            uuid = result["result"][0]["uuid"]
+            device = api.easyeda_get_device(uuid)
+            transform_str = (
+                device.get("result", {})
+                .get("attributes", {})
+                .get("3D Model Transform", "")
+            )
+            if not transform_str:
+                return (0.0, 0.0, 0.0)
+            parts = [float(v.strip()) for v in transform_str.split(",") if v.strip()]
+            if len(parts) < 9:
+                return (0.0, 0.0, 0.0)
+            # mils → mm
+            return (parts[6] * 0.0254, parts[7] * 0.0254, parts[8] * 0.0254)
+        except Exception as exc:
+            self.log(f"3D model offset fetch skipped: {exc}\n")
+            return (0.0, 0.0, 0.0)
 
     def log(self, msg: str) -> None:
         try:

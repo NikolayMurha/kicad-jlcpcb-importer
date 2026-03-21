@@ -73,6 +73,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         # Now that wx is initialized, update window and scale factor
         self.window = wx.GetTopLevelParent(self) or self
         self.scale_factor = GetScaleFactor(self.window)
+        self._sync_shared_meta()
 
         # Insert a topbar with Update button
         topbar = wx.BoxSizer(wx.HORIZONTAL)
@@ -104,6 +105,25 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         )
         self.settings_btn.SetBitmapMargins((2, 0))
         topbar.Add(self.settings_btn, 0, wx.ALL, 5)
+
+        # Library Manager button (project scope only)
+        self.library_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "Import from other libraries",
+            wx.DefaultPosition,
+            wx.DefaultSize,
+            0,
+        )
+        self.library_btn.SetBitmap(
+            loadBitmapScaled("mdi-file-document-outline.png", self.scale_factor)
+        )
+        self.library_btn.SetBitmapMargins((2, 0))
+        topbar.Add(self.library_btn, 0, wx.ALL, 5)
+        topbar.AddStretchSpacer(1)
+        self.mode_status_text = wx.StaticText(self, wx.ID_ANY, "")
+        self.mode_status_text.SetToolTip("Current library storage mode.")
+        topbar.Add(self.mode_status_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
 
         layout = self.GetSizer()
         if layout:
@@ -178,6 +198,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         from ..core.events import EVT_UPDATE_SETTING  # local import to avoid cycle
         self.Bind(EVT_UPDATE_SETTING, self._on_update_setting)
         self.settings_btn.Bind(wx.EVT_BUTTON, self._open_settings)
+        self.library_btn.Bind(wx.EVT_BUTTON, self._open_library_manager)
+        self._update_library_btn_state()
         # Double-click / Enter on list row triggers import instead of part details
         self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.select_part)
 
@@ -380,19 +402,19 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     def _ensure_library_scope_selected(self) -> Optional[str]:
         """Return existing library scope or ask the user to choose.
 
-        Returns "project" or "system". Returns None if the user cancels.
+        Returns "project", "system", or "shared". Returns None if the user cancels.
         """
         try:
             scope = None
             if isinstance(self.settings, dict):
                 scope = (self.settings.get("general", {}) or {}).get("library_scope")
             
-            if scope in ("project", "system"):
+            if scope in ("project", "system", "shared"):
                 return scope
 
             # Ask user
             choice = self._ask_library_scope_dialog()
-            if choice in ("project", "system"):
+            if choice in ("project", "system", "shared"):
                 if "general" not in self.settings:
                     self.settings["general"] = {}
                 self.settings["general"]["library_scope"] = choice
@@ -407,7 +429,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             self,
             title="Where to store libraries?",
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
-            size=HighResWxSize(self, wx.Size(420, 180)),
+            size=HighResWxSize(self, wx.Size(560, 200)),
         )
         try:
             vbox = wx.BoxSizer(wx.VERTICAL)
@@ -423,8 +445,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             hbox = wx.BoxSizer(wx.HORIZONTAL)
             btn_project = wx.Button(dlg, wx.ID_ANY, "Project level")
             btn_system = wx.Button(dlg, wx.ID_ANY, "System level")
+            btn_shared = wx.Button(dlg, wx.ID_ANY, "Shared library")
             hbox.Add(btn_project, 1, wx.ALL | wx.EXPAND, 5)
             hbox.Add(btn_system, 1, wx.ALL | wx.EXPAND, 5)
+            hbox.Add(btn_shared, 1, wx.ALL | wx.EXPAND, 5)
             vbox.Add(hbox, 0, wx.ALL | wx.EXPAND, 5)
 
             dlg.SetSizer(vbox)
@@ -440,8 +464,13 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 result["choice"] = "system"
                 dlg.EndModal(wx.ID_OK)
 
+            def _choose_shared(_evt):
+                result["choice"] = "shared"
+                dlg.EndModal(wx.ID_OK)
+
             btn_project.Bind(wx.EVT_BUTTON, _choose_project)
             btn_system.Bind(wx.EVT_BUTTON, _choose_system)
+            btn_shared.Bind(wx.EVT_BUTTON, _choose_shared)
 
             dlg.CentreOnParent()
             dlg.ShowModal()
@@ -512,6 +541,90 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             self.settings[e.section] = {}
         self.settings[e.section][e.setting] = e.value
         self._save_settings()
+        if e.setting in ("library_scope", "lib_path", "lib_prefix"):
+            self._sync_shared_meta(changed_setting=e.setting)
+        if e.setting == "library_scope":
+            self._update_library_btn_state()
+
+    def _sync_shared_meta(self, changed_setting: str = ""):
+        try:
+            general = (self.settings.get("general", {}) or {})
+            if str(general.get("library_scope", "project")).strip().lower() != "shared":
+                return
+            from ..core.lib_paths import resolve_lib_root, resolve_library_base_name
+            from ..core.lib_tables import LibTablesManager
+            from ..core.shared_lib import (
+                ensure_project_legacy_models_link,
+                ensure_project_table_links,
+                ensure_shared_meta,
+            )
+
+            shared_root, shared_uri_prefix = resolve_lib_root(general, Path(self.project_path))
+            default_name = resolve_library_base_name(general, project_path=Path(self.project_path))
+            override_name = str(general.get("lib_prefix") or "").strip() if changed_setting == "lib_prefix" else None
+            ensure_shared_meta(
+                shared_root,
+                default_name,
+                log=self.log,
+                override_library_name=override_name,
+            )
+            # Keep shared tables in sync and ensure project links exist immediately
+            # when user switches to Shared mode (not only after import).
+            LibTablesManager(shared_root, log=self.log).ensure_project_lib_tables(
+                shared_root,
+                use_project_relative=False,
+                uri_prefix=shared_uri_prefix,
+            )
+            ensure_project_table_links(
+                Path(self.project_path),
+                shared_root,
+                log=self.log,
+            )
+            ensure_project_legacy_models_link(
+                Path(self.project_path),
+                shared_root / "3dmodels",
+                log=self.log,
+            )
+        except Exception as exc:
+            self.log(f"Shared metadata sync failed: {exc}\n")
+
+    def _update_library_btn_state(self):
+        """Enable Library button for project-scoped library workflows."""
+        try:
+            scope = (self.settings.get("general", {}) or {}).get("library_scope", "project")
+            scope_key = str(scope).strip().lower()
+            is_local = scope_key in ("project", "shared")
+            self.library_btn.Enable(is_local)
+            tip = "" if is_local else "Available for Project/Shared scopes only."
+            self.library_btn.SetToolTip(tip)
+            full_label = (
+                "Project"
+                if scope_key == "project"
+                else ("System" if scope_key == "system" else "Shared Library")
+            )
+            short_label = (
+                "Project"
+                if scope_key == "project"
+                else ("System" if scope_key == "system" else "Shared")
+            )
+            self.mode_status_text.SetLabel(f"Mode: {short_label}")
+            self.mode_status_text.SetToolTip(f"Current library storage mode: {full_label}")
+        except Exception:
+            pass
+
+    def _open_library_manager(self, *_):
+        from .library_panel import LibraryManagerDialog
+
+        dlg = None
+        try:
+            dlg = LibraryManagerDialog(self)
+            dlg.ShowModal()
+        finally:
+            try:
+                if dlg is not None:
+                    dlg.Destroy()
+            except Exception:
+                pass
 
     # Expose update for button
     def update_library(self):
@@ -579,17 +692,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             except Exception:
                 val = 0
             self.gauge.SetValue(max(0, min(100, val)))
-
-    def _on_download_started(self, *_):
-        try:
-            if hasattr(self, "update_db_btn") and self.update_db_btn:
-                self.update_db_btn.Enable(False)
-            try:
-                self.set_db_ready(False)
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     def _on_db_download_completed(self, *_):
         """Enable search and refresh categories when DB is ready."""

@@ -36,13 +36,14 @@ def _require_requests():
         raise Exception(msg) from _REQUESTS_IMPORT_ERROR
     return req
 
-MODELS_DIR = "EASYEDA_MODELS"
+MODELS_DIR = "3dmodels"
 
 # UUID strings can be in the format <uuid>|<owner_uuid>. This function gets the <uuid> part
 def getUuidFirstPart(uuid):
     if not uuid:
         return None
     return uuid.split("|")[0]
+
 
 # Extract dataStr from component data. If dataStr is not available, try to decrypt and decompress the data from dataStrId URL.
 def extractDataStr(component_data):
@@ -143,12 +144,18 @@ class ComponentLoader():
         def fetch_device_info(dev_uuid):
             dev_info = self.lcsc_api.easyeda_get_device(dev_uuid)
             debug("device info: " + json.dumps(dev_info, indent=4))
-            device = dev_info["result"]
-            fetched_devices[device["uuid"]] = device
+            result = dev_info.get("result")
+            if not result:
+                raise Exception(f"Empty result for device UUID {dev_uuid}: {dev_info}")
+            fetched_devices[result["uuid"]] = result
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            for dev_uuid in direct_uuids:
-                executor.submit(fetch_device_info, dev_uuid)
+            futures = [executor.submit(fetch_device_info, dev_uuid) for dev_uuid in direct_uuids]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    error(f"Failed to fetch device info: {e}")
 
         # Collect symbol/footprint/3D model UUIDs to fetch
         fetched_symbols = {}
@@ -188,11 +195,13 @@ class ComponentLoader():
 
         # Set symbol/footprint type fields
         for device in fetched_devices.values():
-            if device['attributes'].get('Symbol'):
-                fetched_symbols[device["attributes"]["Symbol"]]["type"] = device["symbol_type"]
+            sym_uuid = device['attributes'].get('Symbol')
+            if sym_uuid and sym_uuid in fetched_symbols:
+                fetched_symbols[sym_uuid]["type"] = device.get("symbol_type", "")
 
-            if device['attributes'].get('Footprint'):
-                fetched_footprints[device["attributes"]["Footprint"]]["type"] = device["footprint_type"]
+            fp_uuid = device['attributes'].get('Footprint')
+            if fp_uuid and fp_uuid in fetched_footprints:
+                fetched_footprints[fp_uuid]["type"] = device.get("footprint_type", "")
 
         # Extract dataStr
         footprint_data_str = {}
@@ -249,7 +258,7 @@ class ComponentLoader():
 
         os.makedirs(self.target_path, exist_ok=True)
 
-        zip_filename = f"{self.target_path}/{self.target_name}.elibz"
+        zip_filename = os.path.join(self.target_path, f"{self.target_name}.elibz")
         merged_data = copy.deepcopy(libDeviceFile)
 
         try:
@@ -324,7 +333,11 @@ class ComponentLoader():
                             device.get("footprint").get("display_title") if device.get("footprint") else "None"))
                     continue
 
-                uuidsToTransform[directUuid] = [float(x) for x in modelTransform.split(",")]
+                parts = [x.strip() for x in modelTransform.split(",") if x.strip()]
+                if len(parts) < 2:
+                    info(f"Skipping 3D transform for '{modelTitle}': not enough values in '{modelTransform}'")
+                    continue
+                uuidsToTransform[directUuid] = [float(x) for x in parts]
 
                 os.makedirs(self.models_dir, exist_ok=True)
                 easyEdaFilename = os.path.join(self.models_dir, modelTitle + ".step")
