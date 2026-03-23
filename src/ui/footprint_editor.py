@@ -100,8 +100,8 @@ class FootprintEditor:
     ) -> bool:
         """Set (offset (xyz X Y Z)) in a single .kicad_mod file.
 
-        easyeda2kicad writes raw EasyEDA canvas coordinates as the model offset,
-        which displaces the 3D model far from the footprint. Pass the real
+        Some importers write raw canvas coordinates as the model offset,
+        displacing the 3D model far from the footprint. Pass the real
         translation from the EasyEDA Pro device API (converted to mm), or leave
         defaults to zero out the offset when no transform data is available.
 
@@ -128,7 +128,7 @@ class FootprintEditor:
     def rewrite_system_3d_model_paths(self, footprints_base: Path | str, models3d_base: Path | str) -> int:
         """In system-wide layout, fix absolute model paths that wrongly point under 'footprints'.
 
-        easyeda2kicad sometimes writes model paths like:
+        System-scope imports sometimes write model paths like:
           /.../footprints/<plugin>/<Name>.3dshapes/<model>
         while models are actually under:
           /.../3dmodels/<plugin>/<Name>.3dshapes/<model>

@@ -30,15 +30,12 @@ class EasyedaImporter:
 
     def _select_impl(self):
         fmt = "easyeda_pro"
-        kicad_backend = "direct"
         try:
             settings = getattr(self.parent_window, "settings", {}) or {}
             general = settings.get("general", {}) or {}
             fmt = str(general.get("lib_format", "easyeda_pro")).strip().lower()
-            kicad_backend = str(general.get("kicad_backend", "direct")).strip().lower()
         except Exception:
             fmt = "easyeda_pro"
-            kicad_backend = "direct"
 
         if fmt == "kicad":
             return KicadImporter(
@@ -47,7 +44,6 @@ class EasyedaImporter:
                 parent_window=self.parent_window,
                 scope=self.scope,
                 lib_dir=self.lib_dir,
-                backend=kicad_backend,
             )
         return EasyedaProImporter(
             project_path=self.project_path,

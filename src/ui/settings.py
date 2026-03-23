@@ -98,22 +98,6 @@ class SettingsDialog(wx.Dialog):
         format_row.Add(self.lib_format_ctrl, 1, wx.EXPAND)
         gen_box.Add(format_row, 0, wx.ALL | wx.EXPAND, 5)
 
-        backend_row = wx.BoxSizer(wx.HORIZONTAL)
-        self._kicad_backend_label = wx.StaticText(self, label="KiCad import backend:")
-        backend_row.Add(self._kicad_backend_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        self.kicad_backend_ctrl = wx.Choice(
-            self,
-            wx.ID_ANY,
-            choices=["Direct (easyeda2kicad)", "Via ELIBZ (compare)"],
-            name="general_kicad_backend",
-        )
-        self.kicad_backend_ctrl.SetToolTip(wx.ToolTip(
-            "Direct: import straight from API. Via ELIBZ: download ELIBZ first, then convert to KiCad."
-        ))
-        self.kicad_backend_ctrl.Bind(wx.EVT_CHOICE, self.update_settings)
-        backend_row.Add(self.kicad_backend_ctrl, 1, wx.EXPAND)
-        gen_box.Add(backend_row, 0, wx.ALL | wx.EXPAND, 5)
-
         # Grouping mode
         group_row = wx.BoxSizer(wx.HORIZONTAL)
         self.group_by_category_ctrl = wx.CheckBox(
@@ -187,7 +171,6 @@ class SettingsDialog(wx.Dialog):
             resolve_library_base_name(general, project_path=Path(self.parent.project_path))
         )
         self.update_lib_format(general.get("lib_format", "easyeda_pro"))
-        self.update_kicad_backend(general.get("kicad_backend", "direct"))
         self.update_lib_path(self._resolve_lib_path_setting(general))
 
     def _resolve_lib_path_setting(self, general: dict) -> str:
@@ -227,8 +210,6 @@ class SettingsDialog(wx.Dialog):
                 value = "project" if sel == 0 else ("system" if sel == 1 else "shared")
             elif name == "lib_format":
                 value = "easyeda_pro" if sel == 0 else "kicad"
-            elif name == "kicad_backend":
-                value = "direct" if sel == 0 else "via_elibz"
             else:
                 value = sel
         else:
@@ -377,31 +358,6 @@ class SettingsDialog(wx.Dialog):
             self.lib_format_ctrl.SetSelection(idx)
         except Exception:
             pass
-        self._refresh_kicad_backend_state()
-
-    def update_kicad_backend(self, value: str):
-        if isinstance(value, str):
-            key = value.strip().lower()
-            idx = 1 if key in ("via_elibz", "elibz", "via-elibz") else 0
-        else:
-            idx = int(value) if value in (0, 1) else 0
-        try:
-            self.kicad_backend_ctrl.SetSelection(idx)
-        except Exception:
-            pass
-        self._refresh_kicad_backend_state()
-
-    def _refresh_kicad_backend_state(self):
-        try:
-            is_kicad = self.lib_format_ctrl.GetSelection() == 1
-        except Exception:
-            is_kicad = False
-        try:
-            self._kicad_backend_label.Enable(is_kicad)
-            self.kicad_backend_ctrl.Enable(is_kicad)
-        except Exception:
-            pass
-
     def update_lib_path(self, value: str):
         try:
             self.lib_path_ctrl.ChangeValue(str(value) if value is not None else "")

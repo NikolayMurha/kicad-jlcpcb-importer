@@ -926,10 +926,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             except Exception:
                 missing.append("pycryptodome")
         try:
-            import easyeda2kicad  # noqa: F401
-        except Exception:
-            missing.append("easyeda2kicad")
-        try:
             import openpyxl  # noqa: F401
         except Exception:
             missing.append("openpyxl")

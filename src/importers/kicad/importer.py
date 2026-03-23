@@ -51,7 +51,6 @@ class KicadImporter:
         parent_window: Optional[wx.Window] = None,
         scope: str = "project",
         lib_dir: Optional[Path | str] = None,
-        backend: str = "direct",  # kept for API compatibility, ignored
     ) -> None:
         self.project_path = Path(project_path)
         self.python_exe = python_exe
@@ -442,7 +441,7 @@ class KicadImporter:
         header = (
             "(kicad_symbol_lib\n"
             "  (version 20211014)\n"
-            "  (generator https://github.com/uPesy/easyeda2kicad.py)\n"
+            "  (generator kicad_symbol_editor)\n"
             ")\n"
         )
         path.write_text(header, encoding="utf-8")
