@@ -167,89 +167,105 @@ class KicadImporter:
                 scope=self.scope,
                 lib_dir=self.lib_dir,
             )
-            ok, elibz_path = elibz_importer.import_part(
-                lcsc_id=lcsc_id,
-                category=category,
-                meta=meta or {},
-            )
-            if not ok:
-                return False, lib_root
+            # For KiCad output we use ELIBZ only as an intermediate source:
+            # create it under temp and delete after conversion to avoid
+            # persisting an extra .elibz library in project scope.
+            with tempfile.TemporaryDirectory(prefix="kicad_elibz_src_") as elibz_tmp:
+                elibz_tmp_path = Path(elibz_tmp)
+                temp_elibz = elibz_tmp_path / f"{sanitize_lib_name(lcsc_id)}.elibz"
+                ok, elibz_path = elibz_importer.import_part(
+                    lcsc_id=lcsc_id,
+                    category=category,
+                    meta=meta or {},
+                    output_elibz_path=temp_elibz,
+                    update_tables=False,
+                    log_saved_path=False,
+                )
+                if not ok:
+                    return False, lib_root
 
-            payload = load_elibz_payload(elibz_path)
-            device_entry = pick_device(payload, lcsc_id=lcsc_id)
-            if device_entry is None:
-                raise ValueError("No matching device in ELIBZ")
+                payload = load_elibz_payload(elibz_path)
+                device_entry = pick_device(payload, lcsc_id=lcsc_id)
+                if device_entry is None:
+                    raise ValueError("No matching device in ELIBZ")
 
-            attrs = device_entry.get("attributes", {}) or {}
-            model_title = str(attrs.get("3D Model Title") or "").strip()
+                attrs = device_entry.get("attributes", {}) or {}
+                model_title = str(attrs.get("3D Model Title") or "").strip()
 
-            # kicad-cli sym/fp upgrade both support .elibz natively (KiCad 9+).
-            # This gives better quality than the v4 API pipeline and already
-            # produces correct (0 0 0) model offsets.
-            with tempfile.TemporaryDirectory(prefix="kicad_elibz_") as tmp:
-                tmp_dir = Path(tmp)
-                converted_sym = tmp_dir / "converted.kicad_sym"
-                converted_pretty = tmp_dir / "converted.pretty"
-                convert_elibz_with_kicad_cli(elibz_path, converted_sym, converted_pretty)
+                # kicad-cli sym/fp upgrade both support .elibz natively (KiCad 9+).
+                # This gives better quality than the v4 API pipeline and already
+                # produces correct (0 0 0) model offsets.
+                with tempfile.TemporaryDirectory(prefix="kicad_elibz_") as tmp:
+                    tmp_dir = Path(tmp)
+                    converted_sym = tmp_dir / "converted.kicad_sym"
+                    converted_pretty = tmp_dir / "converted.pretty"
+                    convert_elibz_with_kicad_cli(elibz_path, converted_sym, converted_pretty)
 
-                source_symbol_name = pick_symbol_name_from_converted(converted_sym, device_entry)
-                if not source_symbol_name:
-                    raise ValueError("Unable to locate symbol in converted ELIBZ")
-                symbol_block = extract_symbol_block(converted_sym, source_symbol_name)
-                if not symbol_block:
-                    raise ValueError(f"Unable to extract symbol block '{source_symbol_name}'")
+                    source_symbol_name = pick_symbol_name_from_converted(converted_sym, device_entry)
+                    if not source_symbol_name:
+                        raise ValueError("Unable to locate symbol in converted ELIBZ")
+                    symbol_block = extract_symbol_block(converted_sym, source_symbol_name)
+                    if not symbol_block:
+                        raise ValueError(f"Unable to extract symbol block '{source_symbol_name}'")
 
-                symbol_name = device_display_name(device_entry) or strip_lcsc_suffix(source_symbol_name)
-                symbol_name = symbol_name or source_symbol_name
-                symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
-                symbol_block = patch_footprint_property(symbol_block, lib_name)
-                add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
+                    symbol_name = device_display_name(device_entry) or strip_lcsc_suffix(source_symbol_name)
+                    symbol_name = symbol_name or source_symbol_name
+                    symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
+                    symbol_block = patch_footprint_property(symbol_block, lib_name)
+                    add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
 
-                # Select footprint: prefer the one linked in the symbol, then
-                # fall back to device attribute candidates, then first available.
-                fp_name_candidates: list[str] = []
-                fp_ref = get_footprint_property(symbol_block) or ""
-                if ":" in fp_ref:
-                    fp_name_candidates.append(fp_ref.split(":", 1)[1])
-                for candidate in (
-                    attrs.get("Footprint"),
-                    (device_entry.get("footprint", {}) or {}).get("display_title"),
-                    (device_entry.get("footprint", {}) or {}).get("title"),
-                ):
-                    text = str(candidate or "").strip()
-                    if text and text not in fp_name_candidates:
-                        fp_name_candidates.append(text)
+                    # Select footprint: prefer the one linked in the symbol, then
+                    # fall back to device attribute candidates, then first available.
+                    fp_name_candidates: list[str] = []
+                    fp_ref = get_footprint_property(symbol_block) or ""
+                    if ":" in fp_ref:
+                        fp_name_candidates.append(fp_ref.split(":", 1)[1])
+                    for candidate in (
+                        attrs.get("Footprint"),
+                        (device_entry.get("footprint", {}) or {}).get("display_title"),
+                        (device_entry.get("footprint", {}) or {}).get("title"),
+                    ):
+                        text = str(candidate or "").strip()
+                        if text and text not in fp_name_candidates:
+                            fp_name_candidates.append(text)
 
-                footprint_path: Optional[Path] = None
-                for fp_name in fp_name_candidates:
-                    src_mod = resolve_footprint_mod_path(converted_pretty, fp_name)
-                    if src_mod is None:
-                        continue
-                    footprint_path = footprint_dir / src_mod.name
-                    shutil.copy2(src_mod, footprint_path)
-                    break
-                if footprint_path is None:
-                    mods = list(converted_pretty.glob("*.kicad_mod"))
-                    if mods:
-                        footprint_path = footprint_dir / mods[0].name
-                        shutil.copy2(mods[0], footprint_path)
-                    else:
-                        self.log("Warning: no footprint found in converted ELIBZ output.\n")
+                    footprint_path: Optional[Path] = None
+                    for fp_name in fp_name_candidates:
+                        src_mod = resolve_footprint_mod_path(converted_pretty, fp_name)
+                        if src_mod is None:
+                            continue
+                        footprint_path = footprint_dir / src_mod.name
+                        shutil.copy2(src_mod, footprint_path)
+                        break
+                    if footprint_path is None:
+                        mods = list(converted_pretty.glob("*.kicad_mod"))
+                        if mods:
+                            footprint_path = footprint_dir / mods[0].name
+                            shutil.copy2(mods[0], footprint_path)
+                        else:
+                            self.log("Warning: no footprint found in converted ELIBZ output.\n")
 
-                # kicad-cli writes ${KIPRJMOD}/EASYEDA_MODELS/<model>.step;
-                # rewrite to our configured models directory.
-                if footprint_path and footprint_path.exists():
-                    model_3d_path = self._model_3d_path(models_dir)
-                    try:
-                        content = footprint_path.read_text(encoding="utf-8", errors="replace")
-                        content = re.sub(
-                            r'\$\{KIPRJMOD\}/EASYEDA_MODELS/',
-                            model_3d_path.rstrip("/") + "/",
-                            content,
-                        )
-                        footprint_path.write_text(content, encoding="utf-8")
-                    except Exception:
-                        pass
+                    # kicad-cli writes ${KIPRJMOD}/EASYEDA_MODELS/<model>.step;
+                    # rewrite to our configured models directory.
+                    if footprint_path and footprint_path.exists():
+                        model_3d_path = self._model_3d_path(models_dir)
+                        try:
+                            content = footprint_path.read_text(encoding="utf-8", errors="replace")
+                            content = re.sub(
+                                r'\$\{KIPRJMOD\}/EASYEDA_MODELS/',
+                                model_3d_path.rstrip("/") + "/",
+                                content,
+                            )
+                            footprint_path.write_text(content, encoding="utf-8")
+                        except Exception:
+                            pass
+
+                if not self.is_system_scope:
+                    step_copied = self._copy_elibz_step_model(model_title, elibz_path, models_dir)
+                    if not step_copied:
+                        # ComponentLoader sometimes skips a model download; fall back to a
+                        # direct LCSC API download using the model UUID from device.json.
+                        self._download_3d_model_fallback(attrs, model_title, models_dir)
 
             self._apply_symbol_metadata(
                 symbol_lib_path=symbol_lib_path,
@@ -257,13 +273,6 @@ class KicadImporter:
                 category=category,
                 meta=meta or {},
             )
-
-            if not self.is_system_scope:
-                step_copied = self._copy_elibz_step_model(model_title, elibz_path, models_dir)
-                if not step_copied:
-                    # ComponentLoader sometimes skips a model download; fall back to a
-                    # direct LCSC API download using the model UUID from device.json.
-                    self._download_3d_model_fallback(attrs, model_title, models_dir)
 
             if self.is_system_scope:
                 editor = FootprintEditor(self.project_path, log=self.log)

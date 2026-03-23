@@ -98,11 +98,20 @@ class EasyedaProImporter:
         lcsc_id: str,
         category: str,
         meta: Optional[Dict] = None,
+        output_elibz_path: Optional[Path | str] = None,
+        update_tables: bool = True,
+        log_saved_path: bool = True,
     ) -> Tuple[bool, Path]:
         category = sanitize_lib_name(category or "Misc")
         symbols_path, _footprints_path, models_3d_path, target_name, lib_root = self._compute_outputs(category)
         target_path = symbols_path
         elibz_path = target_path / f"{target_name}.elibz"
+        if output_elibz_path is not None:
+            elibz_path = Path(output_elibz_path)
+            if elibz_path.suffix.lower() != ".elibz":
+                elibz_path = elibz_path.with_suffix(".elibz")
+            target_path = elibz_path.parent
+            target_name = elibz_path.stem
 
         try:
             self.log(f"Launching ComponentLoader for {lcsc_id} into {target_path}\n")
@@ -114,7 +123,7 @@ class EasyedaProImporter:
                 models_dir=str(models_3d_path),
             )
             loader.downloadAll([lcsc_id])
-            if not self.is_system_scope:
+            if update_tables and (not self.is_system_scope):
                 try:
                     general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
                     if self.is_shared_scope:
@@ -142,7 +151,8 @@ class EasyedaProImporter:
                     )
                 except Exception as exc:
                     self.log(f"Library table update failed: {exc}\n")
-            self.log(f"ComponentLoader saved library: {elibz_path}\n")
+            if log_saved_path:
+                self.log(f"ComponentLoader saved library: {elibz_path}\n")
             return True, elibz_path
         except Exception as exc:
             self.log(f"ComponentLoader import failed: {exc}\n")
