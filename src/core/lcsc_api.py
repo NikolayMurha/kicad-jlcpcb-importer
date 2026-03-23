@@ -1,6 +1,7 @@
 """Unofficial LCSC API."""
 
 import io
+import json
 from pathlib import Path
 from typing import Optional, Union
 
@@ -105,6 +106,29 @@ class LCSC_API:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+
+    def get_3d_model_direct_uuid(self, model_component_uuid: str) -> Optional[str]:
+        """Resolve the direct STEP model file UUID from a 3D model component UUID.
+
+        EasyEDA stores 3D models in two levels:
+          1. The device attribute "3D Model" holds a *component* UUID (may have "|owner" suffix).
+          2. Fetching that component via easyeda_get_component() returns a dataStr JSON whose
+             "model" key contains the actual STEP file UUID used in the download URL.
+        """
+        raw = str(model_component_uuid or "").strip()
+        model_uuid = raw.split("|")[0].strip()
+        if not model_uuid:
+            return None
+        try:
+            comp_info = self.easyeda_get_component(model_uuid)
+            comp_data = comp_info.get("result") or {}
+            data_str = comp_data.get("dataStr")
+            if not data_str:
+                return None
+            direct_uuid = str(json.loads(data_str).get("model") or "").strip()
+            return direct_uuid or None
+        except Exception:
+            return None
 
     def build_file_download_url(self, access_id: str) -> Optional[str]:
         """Build a JLCPCB file download URL from access ID."""

@@ -106,6 +106,21 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.settings_btn.SetBitmapMargins((2, 0))
         topbar.Add(self.settings_btn, 0, wx.ALL, 5)
 
+        # BOM import button
+        self.bom_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "Import from BOM",
+            wx.DefaultPosition,
+            HighResWxSize(self.window, wx.Size(150, -1)),
+            0,
+        )
+        self.bom_btn.SetBitmap(
+            loadBitmapScaled("mdi-file-document-outline.png", self.scale_factor)
+        )
+        self.bom_btn.SetBitmapMargins((2, 0))
+        topbar.Add(self.bom_btn, 0, wx.ALL, 5)
+
         # Library Manager button (project scope only)
         self.library_btn = wx.Button(
             self,
@@ -199,6 +214,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.Bind(EVT_UPDATE_SETTING, self._on_update_setting)
         self.settings_btn.Bind(wx.EVT_BUTTON, self._open_settings)
         self.library_btn.Bind(wx.EVT_BUTTON, self._open_library_manager)
+        self.bom_btn.Bind(wx.EVT_BUTTON, self._on_import_from_bom)
         self._update_library_btn_state()
         # Double-click / Enter on list row triggers import instead of part details
         self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.select_part)
@@ -287,6 +303,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             # Re-offer installation when user attempts to select
             self._check_and_offer_install_deps(force_prompt=True)
             return
+        rows = []
         try:
             if getattr(self, "part_list", None) is None:
                 wx.PostEvent(
@@ -300,49 +317,171 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                     MessageEvent(title="No selection", text="Select an item in the list.", style="warning"),
                 )
                 return
-            item = self.part_list.GetSelection()
-            lcsc_id = str(self.part_list_model.get_lcsc(item)).strip()
-            # Also capture metadata for symbol augmentation
+
+            selected_items = []
             try:
-                category = str(self.part_list_model.get_category(item)).strip()
+                arr = dv.DataViewItemArray()
+                count = self.part_list.GetSelections(arr)
+                try:
+                    n = int(count)
+                except Exception:
+                    n = 0
+                if n > 0:
+                    selected_items = [arr[i] for i in range(n)]
+                else:
+                    selected_items = [arr[i] for i in range(len(arr))]
             except Exception:
-                category = ""
-            try:
-                mfr_part = str(self.part_list_model.get_mfr_number(item)).strip()
-            except Exception:
-                mfr_part = ""
-            try:
-                manufacturer = str(self.part_list_model.get_manufacturer(item)).strip()
-            except Exception:
-                manufacturer = ""
-            try:
-                descr = str(self.part_list_model.get_description(item)).strip()
-            except Exception:
-                descr = ""
-            try:
-                attributes_json = str(self.part_list_model.get_attributes(item)).strip()
-            except Exception:
-                attributes_json = ""
-            if not lcsc_id:
+                try:
+                    raw = self.part_list.GetSelections()
+                    if isinstance(raw, (list, tuple)):
+                        selected_items = list(raw)
+                    else:
+                        selected_items = list(raw) if raw else []
+                except Exception:
+                    selected_items = []
+
+            if not selected_items:
+                item = self.part_list.GetSelection()
+                is_ok = False
+                try:
+                    is_ok = bool(item.IsOk())
+                except Exception:
+                    is_ok = False
+                if is_ok:
+                    selected_items = [item]
+
+            for item in selected_items:
+                try:
+                    lcsc_id = str(self.part_list_model.get_lcsc(item)).strip()
+                except Exception:
+                    continue
+                if not lcsc_id:
+                    continue
+                try:
+                    category = str(self.part_list_model.get_category(item)).strip()
+                except Exception:
+                    category = ""
+                try:
+                    mfr_part = str(self.part_list_model.get_mfr_number(item)).strip()
+                except Exception:
+                    mfr_part = ""
+                try:
+                    manufacturer = str(self.part_list_model.get_manufacturer(item)).strip()
+                except Exception:
+                    manufacturer = ""
+                try:
+                    descr = str(self.part_list_model.get_description(item)).strip()
+                except Exception:
+                    descr = ""
+                try:
+                    attributes_json = str(self.part_list_model.get_attributes(item)).strip()
+                except Exception:
+                    attributes_json = ""
+                rows.append(
+                    (
+                        lcsc_id,
+                        category,
+                        {
+                            "mfr_part": mfr_part,
+                            "manufacturer": manufacturer,
+                            "description": descr,
+                            "attributes_json": attributes_json,
+                        },
+                    )
+                )
+            if not rows:
                 wx.PostEvent(
                     self,
-                    MessageEvent(title="No LCSC", text="No LCSC ID in the selected row.", style="warning"),
+                    MessageEvent(title="No LCSC", text="No valid LCSC ID in selected rows.", style="warning"),
                 )
                 return
-        except Exception:
+        except Exception as exc:
+            try:
+                self.log(f"Selection parse failed: {exc}\n")
+            except Exception:
+                pass
             wx.PostEvent(
                 self,
                 MessageEvent(title="Error", text="Failed to obtain LCSC ID.", style="error"),
             )
             return
 
-        meta = {
-            "mfr_part": mfr_part,
-            "manufacturer": manufacturer,
-            "description": descr,
-            "attributes_json": attributes_json,
-        }
-        self._import_part_via_easyeda(lcsc_id, category, meta)
+        if len(rows) == 1:
+            lcsc_id, category, meta = rows[0]
+            self._import_part_via_easyeda(lcsc_id, category, meta)
+            return
+
+        self._import_parts_via_easyeda(rows)
+
+    def _import_parts_via_easyeda(self, rows):
+        base = Path(PLUGIN_PATH)
+        lib_dir = base / "lib"
+        scope = self._ensure_library_scope_selected()
+        if not scope:
+            wx.PostEvent(
+                self, LogboxAppendEvent(msg="Import canceled: no library location selected.\n")
+            )
+            return
+
+        btn = getattr(self, "select_part_button", None)
+        if btn is not None:
+            btn.Enable(False)
+
+        importer = EasyedaImporter(
+            project_path=self.project_path,
+            python_exe=self._resolve_python_exe(),
+            parent_window=self,
+            scope=str(scope),
+            lib_dir=lib_dir,
+        )
+
+        def _worker():
+            wx.BeginBusyCursor()
+            ok_count = 0
+            total = len(rows)
+            try:
+                for idx, (lcsc_id, category, meta) in enumerate(rows, start=1):
+                    wx.PostEvent(
+                        self,
+                        LogboxAppendEvent(msg=f"Importing {lcsc_id} ({idx}/{total})...\n"),
+                    )
+                    try:
+                        ok, lib_base = importer.import_part(
+                            lcsc_id=lcsc_id,
+                            category=category,
+                            meta=meta or {},
+                        )
+                    except Exception as e:
+                        wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
+                        ok, lib_base = False, self.project_path
+
+                    if ok:
+                        ok_count += 1
+                        display_path = Path(lib_base)
+                        location_label = "File" if display_path.suffix.lower() == ".elibz" else "Folder"
+                        wx.PostEvent(
+                            self,
+                            LogboxAppendEvent(
+                                msg=f"*********  IMPORT SUCCESS: {lcsc_id}  *********\n{location_label}: {display_path}\n"
+                            ),
+                        )
+                    else:
+                        wx.PostEvent(
+                            self,
+                            LogboxAppendEvent(msg=f"*********  IMPORT FAILED: {lcsc_id}  *********\n"),
+                        )
+                wx.PostEvent(
+                    self,
+                    LogboxAppendEvent(
+                        msg=f"Batch import finished: {ok_count}/{total} successful.\n"
+                    ),
+                )
+            finally:
+                wx.EndBusyCursor()
+                if btn is not None:
+                    wx.CallAfter(btn.Enable, True)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _import_part_via_easyeda(self, lcsc_id: str, category: str = "", meta: Optional[Dict] = None):
         base = Path(PLUGIN_PATH)
@@ -667,6 +806,41 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if hasattr(self, "console") and self.console:
             self.console.Clear()
 
+    def _on_import_from_bom(self, *_):
+        """Open a BOM file, extract LCSC IDs and populate the parts list."""
+        from ..core.bom_parser import parse_bom_lcsc_ids
+
+        with wx.FileDialog(
+            self,
+            "Open BOM file",
+            wildcard="BOM files (*.csv;*.xlsx;*.tsv)|*.csv;*.xlsx;*.tsv|All files (*.*)|*.*",
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+
+        try:
+            ids = parse_bom_lcsc_ids(path)
+        except Exception as exc:
+            wx.MessageBox(
+                f"Failed to parse BOM file:\n{exc}",
+                "BOM import error",
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+
+        if not ids:
+            wx.MessageBox(
+                "No LCSC part numbers found in the selected file.",
+                "BOM import",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
+        self.log(f"BOM: found {len(ids)} LCSC ID(s): {', '.join(ids)}\n")
+        self.populate_from_lcsc_ids(ids)
+
     def _open_settings(self, *_):
         dlg = None
         try:
@@ -755,6 +929,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             import easyeda2kicad  # noqa: F401
         except Exception:
             missing.append("easyeda2kicad")
+        try:
+            import openpyxl  # noqa: F401
+        except Exception:
+            missing.append("openpyxl")
 
         if missing:
             self._deps_ready = False

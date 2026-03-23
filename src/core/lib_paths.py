@@ -68,7 +68,7 @@ def _to_bool(value, default: bool) -> bool:
     return default
 
 
-def resolve_group_by_category(general: dict, default: bool = True) -> bool:
+def resolve_group_by_category(general: dict, default: bool = False) -> bool:
     """Return whether library naming should include category suffixes."""
     if "group_by_category" in general:
         return _to_bool(general.get("group_by_category"), default)
@@ -102,7 +102,7 @@ def resolve_library_base_name(
     chosen = raw or legacy_single_name or default
 
     scope = str(general.get("library_scope", "project")).strip().lower()
-    grouped = resolve_group_by_category(general, default=True)
+    grouped = resolve_group_by_category(general, default=False)
     untouched = not raw or chosen == default
 
     # For project-local single library mode, default to project name when the
@@ -136,7 +136,7 @@ def resolve_target_library_name(
         default=default_name,
         project_path=project_path,
     )
-    if not resolve_group_by_category(general, default=True):
+    if not resolve_group_by_category(general, default=False):
         return sanitize(base)
 
     cat = sanitize(category or "Misc")

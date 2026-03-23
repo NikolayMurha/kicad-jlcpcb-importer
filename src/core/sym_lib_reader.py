@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .helpers import strip_lcsc_suffix
 
 # ---------------------------------------------------------------------------
 # KiCad path variable resolution
@@ -17,7 +18,7 @@ from typing import List, Optional, Tuple
 def _kicad_dirs(kind: str) -> List[str]:
     """Return candidate paths for built-in KiCad symbol or footprint libraries."""
     paths: List[str] = []
-    for ver in ("9", "8", "7", "6"):
+    for ver in ("10", "9", "8", "7", "6"):
         env = os.environ.get(f"KICAD{ver}_{kind}_DIR")
         if env:
             paths.append(env)
@@ -26,6 +27,7 @@ def _kicad_dirs(kind: str) -> List[str]:
             "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
             "/usr/share/kicad/symbols",
             "/usr/local/share/kicad/symbols",
+            r"C:\Program Files\KiCad\10.0\share\kicad\symbols",
             r"C:\Program Files\KiCad\9.0\share\kicad\symbols",
             r"C:\Program Files\KiCad\8.0\share\kicad\symbols",
         ]
@@ -34,6 +36,7 @@ def _kicad_dirs(kind: str) -> List[str]:
             "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
             "/usr/share/kicad/footprints",
             "/usr/local/share/kicad/footprints",
+            r"C:\Program Files\KiCad\10.0\share\kicad\footprints",
             r"C:\Program Files\KiCad\9.0\share\kicad\footprints",
             r"C:\Program Files\KiCad\8.0\share\kicad\footprints",
         ]
@@ -47,7 +50,7 @@ def resolve_uri(uri: str, project_path: Optional[Path] = None, table_dir: Option
         result = result.replace("${KIPRJMOD}", str(project_path))
     sym_dirs = _kicad_dirs("SYMBOL")
     fp_dirs = _kicad_dirs("FOOTPRINT")
-    for ver in ("9", "8", "7", "6"):
+    for ver in ("10", "9", "8", "7", "6"):
         if sym_dirs:
             result = result.replace(f"${{KICAD{ver}_SYMBOL_DIR}}", sym_dirs[0])
         if fp_dirs:
@@ -71,7 +74,7 @@ def get_user_settings_path() -> Optional[Path]:
         pass
 
     home = Path.home()
-    for ver in ("9.0", "8.0", "7.0", "6.0"):
+    for ver in ("10.0", "9.0", "8.0", "7.0", "6.0"):
         for base in [
             home / ".config" / "kicad" / ver,
             home / "Library" / "Preferences" / "kicad" / ver,
@@ -413,6 +416,7 @@ def list_symbols_elibz_meta(lib_path: Path) -> List[Tuple[str, str, str, bool]]:
                 or dev.get("product_code")
                 or _uuid
             ).strip()
+            name = strip_lcsc_suffix(name)
             desc = (dev.get("description") or "").strip()
             attrs = dev.get("attributes", {}) or {}
             footprint = str(attrs.get("Footprint") or "").strip()

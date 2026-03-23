@@ -281,9 +281,14 @@ class SymbolEditor:
                     if modified:
                         changes += 1
 
-        # Normalize any two-pin symbol: passive/line, name '~', hide numbers
+        # Normalize pin style only for explicitly passive-like categories.
+        # Do not touch transistor/IC symbols here.
+        passive_like = any(
+            key in cat
+            for key in ("resistor", "capacitor", "inductor", "ferrite", "bead", "diode")
+        )
         pins = self._find_pin_blocks(self._block)
-        if pins and (len(pins) <= 2 or (len(pins) == 3 and "diodes" in cat)): 
+        if passive_like and pins and (len(pins) <= 2 or (len(pins) == 3 and "diode" in cat)):
             new_parts: List[str] = []
             prev = 0
             header_re = re.compile(r'^\(pin(?:\s+|\s*\n\s*)\S+(?:\s+|\s*\n\s*)\S+', re.MULTILINE)

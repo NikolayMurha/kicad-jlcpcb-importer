@@ -53,7 +53,10 @@ class EasyedaProImporter:
         )
 
         if self.is_system_scope:
-            third_party = os.environ.get("KICAD9_3RD_PARTY")
+            third_party = (
+                os.environ.get("KICAD10_3RD_PARTY")
+                or os.environ.get("KICAD9_3RD_PARTY")
+            )
             if third_party and isinstance(third_party, str) and third_party.strip():
                 base_path = Path(third_party)
             else:

@@ -2,7 +2,8 @@
   "general": {
     "library_scope": "project",
     "lib_format": "easyeda_pro",
-    "group_by_category": true,
+    "kicad_backend": "direct",
+    "group_by_category": false,
     "lib_prefix": "JLCPCB",
     "lib_path": "library"
   },

@@ -11,13 +11,22 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import wx
 
-from ..core.helpers import HighResWxSize, sanitize_lib_name
+from ..core.elibz_native import (
+    convert_elibz_with_kicad_cli,
+    find_device_by_name,
+    load_elibz_payload,
+    pick_symbol_name_from_converted,
+    rename_symbol_block,
+    resolve_footprint_mod_path as resolve_elibz_footprint_mod_path,
+)
+from ..core.helpers import HighResWxSize, sanitize_lib_name, strip_lcsc_suffix
 from ..core.lib_paths import (
     resolve_group_by_category,
     resolve_lib_root,
@@ -69,6 +78,7 @@ class LibraryManagerDialog(wx.Dialog):
         self._all_items: List[Tuple[str, str, Path, str, str, str]] = []
         self._filtered: List[Tuple[str, str, Path, str, str, str]] = []
         self._fp_model_cache: dict[str, bool] = {}
+        self._import_running = False
 
         self._build_ui()
         self._refresh_connected_libs()
@@ -125,7 +135,7 @@ class LibraryManagerDialog(wx.Dialog):
         item_filter_row.Add(self._search, 1, wx.EXPAND)
         right.Add(item_filter_row, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self._list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN)
+        self._list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
         self._list.InsertColumn(0, "Name", width=280)
         self._list.InsertColumn(1, "Library", width=180)
         self._list.InsertColumn(2, "Footprint", width=120)
@@ -216,7 +226,7 @@ class LibraryManagerDialog(wx.Dialog):
     def _category_hint_from_source(self, src_path: Path) -> str:
         raw = sanitize_lib_name(src_path.stem or "Misc")
         general = self._general_settings()
-        if not resolve_group_by_category(general, default=True):
+        if not resolve_group_by_category(general, default=False):
             return raw
 
         base = sanitize_lib_name(
@@ -312,7 +322,7 @@ class LibraryManagerDialog(wx.Dialog):
             self._list.DeleteAllItems()
             self._all_items = []
             self._filtered = []
-            self._import_btn.Enable(False)
+            self._sync_import_button_state()
             kind = "footprint" if self._is_footprint_mode() else "symbol"
             if all_libs and q_lib:
                 self._set_status(f"No {kind} libraries match this filter.", dim=True)
@@ -478,7 +488,7 @@ class LibraryManagerDialog(wx.Dialog):
             f"{count_str} {self._active_item_label()}  ->  {dest_preview}",
             dim=True,
         )
-        self._import_btn.Enable(False)
+        self._sync_import_button_state()
 
     def _on_lib_selected(self, _evt):
         sel = self._lib_list.GetSelection()
@@ -547,10 +557,10 @@ class LibraryManagerDialog(wx.Dialog):
             dlg.Destroy()
 
     def _on_sym_selected(self, _evt):
-        self._import_btn.Enable(True)
+        self._sync_import_button_state()
 
     def _on_item_deselected(self, _evt):
-        self._import_btn.Enable(False)
+        self._sync_import_button_state()
 
     def _on_import_activated(self, _evt):
         self._do_import_selected()
@@ -558,22 +568,46 @@ class LibraryManagerDialog(wx.Dialog):
     def _on_import_btn(self, _evt):
         self._do_import_selected()
 
-    def _do_import_selected(self):
+    def _selected_filtered_items(self) -> List[Tuple[str, str, Path, str, str, str]]:
+        out: List[Tuple[str, str, Path, str, str, str]] = []
         sel = self._list.GetFirstSelected()
-        if sel < 0 or sel >= len(self._filtered):
+        while sel != -1:
+            if 0 <= sel < len(self._filtered):
+                out.append(self._filtered[sel])
+            sel = self._list.GetNextSelected(sel)
+        return out
+
+    def _sync_import_button_state(self):
+        try:
+            enabled = (not self._import_running) and self._list.GetSelectedItemCount() > 0
+            self._import_btn.Enable(enabled)
+        except Exception:
+            self._import_btn.Enable(False)
+
+    def _do_import_selected(self):
+        selected_items = self._selected_filtered_items()
+        if not selected_items:
             return
-        item_name, _desc, src_path, src_alias, _fp_label, _has3d = self._filtered[sel]
         is_footprint_mode = self._is_footprint_mode()
         item_label = "footprint" if is_footprint_mode else "symbol"
-        self._import_btn.Enable(False)
-        self._set_status(f"Importing {item_label} {item_name}…", dim=True)
+        self._import_running = True
+        self._sync_import_button_state()
+        total = len(selected_items)
+        if total == 1:
+            self._set_status(f"Importing {item_label} {selected_items[0][0]}…", dim=True)
+        else:
+            self._set_status(f"Importing {total} {self._active_item_label()}…", dim=True)
 
         def _worker():
-            if is_footprint_mode:
-                ok, msg = self._import_footprint(item_name, src_path, src_alias)
-            else:
-                ok, msg = self._import_symbol(item_name, src_path)
-            wx.CallAfter(self._on_import_done, item_name, ok, msg)
+            results: List[Tuple[str, bool, str]] = []
+            for idx, (item_name, _desc, src_path, src_alias, _fp_label, _has3d) in enumerate(selected_items, start=1):
+                wx.CallAfter(self._set_status, f"Importing {item_label} {item_name}… ({idx}/{total})", True)
+                if is_footprint_mode:
+                    ok, msg = self._import_footprint(item_name, src_path, src_alias)
+                else:
+                    ok, msg = self._import_symbol(item_name, src_path)
+                results.append((item_name, ok, msg))
+            wx.CallAfter(self._on_import_batch_done, results)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -619,79 +653,14 @@ class LibraryManagerDialog(wx.Dialog):
         dest: Path,
         category_hint: str,
     ) -> Tuple[bool, str]:
-        import json
-        import zipfile
-
-        from easyeda2kicad.easyeda.easyeda_importer import (
-            Easyeda3dModelImporter,
-            EasyedaFootprintImporter,
-            EasyedaSymbolImporter,
-        )
-        from easyeda2kicad.kicad.export_kicad_3d_model import Exporter3dModelKicad
-        from easyeda2kicad.kicad.export_kicad_footprint import ExporterFootprintKicad
-        from easyeda2kicad.kicad.export_kicad_symbol import ExporterSymbolKicad
-        from easyeda2kicad.kicad.parameters_kicad_symbol import KicadVersion
-
         try:
-            with zipfile.ZipFile(src_path, "r") as zf:
-                payload = json.loads(zf.read("device.json").decode("utf-8"))
-                device_entry = None
-                for _uuid, dev in payload.get("devices", {}).items():
-                    candidate = (
-                        dev.get("display_title")
-                        or dev.get("title")
-                        or dev.get("name")
-                        or dev.get("product_code")
-                        or ""
-                    ).strip()
-                    if candidate == symbol_name:
-                        device_entry = dev
-                        break
-                if device_entry is None:
-                    return False, f"Device '{symbol_name}' not found in source"
-
-                attrs = device_entry.get("attributes", {}) or {}
-                sym_uuid = attrs.get("Symbol")
-                fp_uuid = attrs.get("Footprint")
-                if not sym_uuid or not fp_uuid:
-                    return False, f"Device '{symbol_name}' has no linked symbol/footprint"
-
-                sym_data = json.loads(zf.read(f"SYMBOL/{sym_uuid}.esym").decode("utf-8"))
-                fp_data = json.loads(zf.read(f"FOOTPRINT/{fp_uuid}.efoo").decode("utf-8"))
+            payload = load_elibz_payload(src_path)
+            device_entry = find_device_by_name(payload, symbol_name)
+            if device_entry is None:
+                return False, f"Device '{symbol_name}' not found in source"
+            attrs = device_entry.get("attributes", {}) or {}
         except Exception as exc:
             return False, f"Unable to read source .elibz: {exc}"
-
-        try:
-            sym_head = sym_data.setdefault("head", {})
-            sym_c_para = sym_head.setdefault("c_para", {})
-            if not str(sym_c_para.get("name", "")).strip():
-                sym_c_para["name"] = symbol_name
-            if not str(sym_c_para.get("pre", "")).strip():
-                sym_c_para["pre"] = "U"
-
-            fp_head = fp_data.setdefault("head", {})
-            fp_c_para = fp_head.setdefault("c_para", {})
-            if not str(fp_c_para.get("package", "")).strip():
-                fp_c_para["package"] = str(attrs.get("Footprint") or symbol_name)
-
-            if not str(sym_c_para.get("package", "")).strip():
-                sym_c_para["package"] = fp_c_para.get("package", "")
-        except Exception:
-            pass
-
-        product_code = str(device_entry.get("product_code") or "").strip()
-        datasheet_url = str(device_entry.get("dataManualUrl") or device_entry.get("datasheet") or "").strip()
-        fp_type = str(device_entry.get("footprint_type") or "").lower()
-
-        cad_data = {
-            "dataStr": sym_data,
-            "packageDetail": {
-                "dataStr": fp_data,
-                "title": str(attrs.get("Footprint") or symbol_name),
-            },
-            "SMT": "smd" in fp_type,
-            "lcsc": {"url": datasheet_url, "number": product_code},
-        }
 
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -699,52 +668,68 @@ class LibraryManagerDialog(wx.Dialog):
             dest_pretty.mkdir(parents=True, exist_ok=True)
             dest_models = self._get_models_dir()
             dest_models.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="elibz_convert_") as td:
+                tmp_dir = Path(td)
+                converted_sym = tmp_dir / "converted.kicad_sym"
+                converted_pretty = tmp_dir / "converted.pretty"
+                convert_elibz_with_kicad_cli(src_path, converted_sym, converted_pretty)
 
-            symbol = EasyedaSymbolImporter(easyeda_cp_cad_data=cad_data).get_symbol()
-            kicad_symbol = ExporterSymbolKicad(
-                symbol=symbol, kicad_version=KicadVersion.v6
-            ).export(footprint_lib_name=dest.stem)
-            add_or_replace_symbol(dest, symbol.info.name, kicad_symbol)
+                clean_symbol_name = strip_lcsc_suffix(symbol_name)
+                source_symbol_name = pick_symbol_name_from_converted(
+                    converted_sym,
+                    device_entry,
+                    requested_name=clean_symbol_name,
+                )
+                if not source_symbol_name:
+                    return False, "Unable to locate symbol in converted ELIBZ output"
 
-            footprint = EasyedaFootprintImporter(easyeda_cp_cad_data=cad_data).get_footprint()
-            footprint_path = dest_pretty / f"{footprint.info.name}.kicad_mod"
-            ExporterFootprintKicad(footprint=footprint).export(
-                footprint_full_path=str(footprint_path),
-                model_3d_path=self._model_uri_base(),
-            )
+                block = extract_symbol_block(converted_sym, source_symbol_name)
+                if block is None:
+                    return False, f"Symbol '{source_symbol_name}' not found in converted ELIBZ output"
+
+                if source_symbol_name != clean_symbol_name:
+                    block = rename_symbol_block(block, source_symbol_name, clean_symbol_name)
+
+                block = patch_footprint_property(block, dest.stem)
+                add_or_replace_symbol(dest, clean_symbol_name, block)
+
+                fp_candidates: List[str] = []
+                fp_ref = get_footprint_property(block) or ""
+                if ":" in fp_ref:
+                    fp_candidates.append(fp_ref.split(":", 1)[1])
+                for cand in (
+                    attrs.get("Footprint"),
+                    (device_entry.get("footprint", {}) or {}).get("display_title"),
+                    (device_entry.get("footprint", {}) or {}).get("title"),
+                ):
+                    text = str(cand or "").strip()
+                    if text and text not in fp_candidates:
+                        fp_candidates.append(text)
+
+                footprint_path = None
+                for fp_name in fp_candidates:
+                    src_mod = resolve_elibz_footprint_mod_path(converted_pretty, fp_name)
+                    if src_mod is None:
+                        continue
+                    footprint_path = dest_pretty / src_mod.name
+                    shutil.copy2(src_mod, footprint_path)
+                    break
 
             model_copied = False
-            try:
-                model = Easyeda3dModelImporter(
-                    easyeda_cp_cad_data=cad_data, download_raw_3d_model=True
-                ).output
-                exporter = Exporter3dModelKicad(model_3d=model)
-                if exporter.output:
-                    (dest_models / f"{exporter.output.name}.wrl").write_text(
-                        exporter.output.raw_wrl, encoding="utf-8"
-                    )
-                    model_copied = True
-                if exporter.output_step and exporter.output:
-                    (dest_models / f"{exporter.output.name}.step").write_bytes(exporter.output_step)
-                    model_copied = True
-                elif exporter.output_step and model:
-                    (dest_models / f"{model.name}.step").write_bytes(exporter.output_step)
-                    model_copied = True
-            except Exception:
-                model_copied = False
 
             if not model_copied:
                 model_copied = self._copy_elibz_step_model(symbol_name, src_path)
                 if model_copied:
                     try:
-                        content = footprint_path.read_text(encoding="utf-8", errors="replace")
-                        content = re.sub(r"\.wrl\"", '.step"', content)
-                        footprint_path.write_text(content, encoding="utf-8")
+                        if footprint_path is not None:
+                            content = footprint_path.read_text(encoding="utf-8", errors="replace")
+                            content = re.sub(r"\.wrl\"", '.step"', content)
+                            footprint_path.write_text(content, encoding="utf-8")
                     except Exception:
                         pass
 
             self._update_lib_tables(dest)
-            parts = [f"'{symbol_name}' vendored", "symbol+footprint converted"]
+            parts = [f"'{symbol_name}' vendored", "symbol+footprint converted (native kicad-cli)"]
             if model_copied:
                 parts.append("3D model copied")
             return True, " — ".join(parts)
@@ -752,24 +737,10 @@ class LibraryManagerDialog(wx.Dialog):
             return False, f"ELIBZ → KiCad conversion failed: {exc}"
 
     def _copy_elibz_step_model(self, symbol_name: str, src_path: Path) -> bool:
-        import json
-        import zipfile
-
         try:
-            with zipfile.ZipFile(src_path, "r") as zf:
-                devices = json.loads(zf.read("device.json").decode("utf-8"))
-            model_title = None
-            for _uuid, dev in devices.get("devices", {}).items():
-                candidate = (
-                    dev.get("display_title")
-                    or dev.get("title")
-                    or dev.get("name")
-                    or dev.get("product_code")
-                    or ""
-                ).strip()
-                if candidate == symbol_name:
-                    model_title = (dev.get("attributes") or {}).get("3D Model Title")
-                    break
+            payload = load_elibz_payload(src_path)
+            dev = find_device_by_name(payload, symbol_name)
+            model_title = str(((dev or {}).get("attributes") or {}).get("3D Model Title") or "").strip()
         except Exception:
             return False
 
@@ -1055,10 +1026,34 @@ class LibraryManagerDialog(wx.Dialog):
         except Exception:
             pass
 
-    def _on_import_done(self, _symbol_name: str, ok: bool, msg: str):
-        self._import_btn.Enable(True)
-        colour = _OK_COLOUR if ok else _ERR_COLOUR
-        self._set_status(("✓ " if ok else "✗ ") + msg, colour=colour)
+    def _on_import_batch_done(self, results: List[Tuple[str, bool, str]]):
+        self._import_running = False
+        self._sync_import_button_state()
+        if not results:
+            self._set_status("No items imported.", dim=True)
+            return
+
+        if len(results) == 1:
+            _name, ok, msg = results[0]
+            colour = _OK_COLOUR if ok else _ERR_COLOUR
+            self._set_status(("✓ " if ok else "✗ ") + msg, colour=colour)
+            return
+
+        ok_count = sum(1 for _n, ok, _m in results if ok)
+        fail = [(n, m) for n, ok, m in results if not ok]
+        if not fail:
+            self._set_status(
+                f"✓ Imported {ok_count}/{len(results)} {self._active_item_label()}",
+                colour=_OK_COLOUR,
+            )
+            return
+
+        first_name, first_msg = fail[0]
+        suffix = f"; +{len(fail) - 1} more failed" if len(fail) > 1 else ""
+        self._set_status(
+            f"✗ Imported {ok_count}/{len(results)}. First error: {first_name}: {first_msg}{suffix}",
+            colour=_ERR_COLOUR,
+        )
 
     def _set_status(self, text: str, dim: bool = False, colour: Optional[wx.Colour] = None):
         try:

@@ -12,6 +12,7 @@ from pcbnew import *  # type: ignore
 
 from . import decryptor
 from ...core.lcsc_api import LCSC_API
+from ...core.helpers import strip_lcsc_suffix
 
 _REQUESTS_IMPORT_ERROR = None
 _REQUESTS = None
@@ -228,6 +229,7 @@ class ComponentLoader():
                 or device.get("product_code")
                 or ""
             ).strip()
+            name = strip_lcsc_suffix(name)
             if name:
                 sym_uuid_to_name[sym_uuid] = name
 
@@ -241,14 +243,31 @@ class ComponentLoader():
                     try:
                         sym_obj = json.loads(ds)
                         head = sym_obj.get("head") if isinstance(sym_obj, dict) else None
-                        if isinstance(head, dict) and head.get("name", "").strip() in ("", "~"):
-                            head["name"] = dev_name
-                            ds = json.dumps(sym_obj, ensure_ascii=False)
+                        if isinstance(head, dict):
+                            head_name = str(head.get("name", "")).strip()
+                            clean_head_name = strip_lcsc_suffix(head_name)
+                            changed = False
+                            if clean_head_name and clean_head_name != head_name:
+                                head["name"] = clean_head_name
+                                changed = True
+                            elif head_name in ("", "~"):
+                                head["name"] = dev_name
+                                changed = True
+                            if changed:
+                                ds = json.dumps(sym_obj, ensure_ascii=False)
                     except Exception:
                         pass
                 symbol_data_str[s_uuid] = ds
 
             s_data.pop("dataStr", None) # Remove the dataStr field if exists
+
+        # Normalize human-facing names in device entries so elibz symbols/lists
+        # do not include trailing _Cxxxxxx suffixes.
+        for device in fetched_devices.values():
+            for key in ("display_title", "title", "name"):
+                raw = str(device.get(key) or "").strip()
+                if raw:
+                    device[key] = strip_lcsc_suffix(raw)
 
         libDeviceFile = {
             "devices": fetched_devices,

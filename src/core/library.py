@@ -299,6 +299,39 @@ class Library:
             with con as cur:
                 return cur.execute(query).fetchall()
 
+    def search_by_lcsc_ids(self, ids: list) -> list:
+        """Return parts whose 'LCSC Part' value is in *ids*.
+
+        Uses a plain IN query (no FTS5) so all IDs are matched exactly and
+        multiple codes can be searched in one call.
+        """
+        if not ids:
+            return []
+        columns = [
+            "LCSC Part",
+            "MFR.Part",
+            "Package",
+            "Solder Joint",
+            "Library Type",
+            "Stock",
+            "Manufacturer",
+            "Description",
+            "Price",
+            "First Category",
+            "Attributes",
+        ]
+        s = ",".join(f'"{c}"' for c in columns)
+        placeholders = ",".join("?" for _ in ids)
+        query = (
+            f'SELECT {s} FROM parts WHERE "LCSC Part" IN ({placeholders})'
+            f' ORDER BY "LCSC Part" COLLATE naturalsort ASC'
+        )
+        self.logger.debug("search_by_lcsc_ids query '%s' ids=%s", query, ids)
+        with contextlib.closing(sqlite3.connect(self.partsdb_file)) as con:
+            con.create_collation("naturalsort", natural_sort_collation)
+            with con as cur:
+                return cur.execute(query, ids).fetchall()
+
     def delete_parts_table(self):
         """Delete the parts table."""
         with contextlib.closing(sqlite3.connect(self.partsdb_file)) as con, con as cur:

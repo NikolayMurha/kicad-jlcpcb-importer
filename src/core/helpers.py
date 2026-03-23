@@ -105,6 +105,15 @@ def sanitize_lib_name(name: str) -> str:
     return cleaned or "Misc"
 
 
+def strip_lcsc_suffix(name: str) -> str:
+    """Drop trailing LCSC suffix from part name, e.g. ``AO3400A_C123456`` -> ``AO3400A``."""
+    raw = str(name or "").strip()
+    if not raw:
+        return raw
+    stripped = re.sub(r"_C\d+$", "", raw)
+    return stripped or raw
+
+
 def dict_factory(cursor, row) -> dict:
     """Row factory that returns a dict."""
     d = {}

@@ -508,7 +508,7 @@ class PartSelectorDialog(wx.Dialog):
 
         self.part_list = dv.DataViewCtrl(
             table_scroller,
-            style=wx.BORDER_THEME | dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE,
+            style=wx.BORDER_THEME | dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_MULTIPLE,
         )
     
         # First column: thumbnail image
@@ -948,6 +948,16 @@ class PartSelectorDialog(wx.Dialog):
         # self.logger.debug(result)
         search_duration = time.time() - start
         self.populate_part_list(result, search_duration)
+
+    def populate_from_lcsc_ids(self, ids: list) -> None:
+        """Search the database for the given LCSC IDs and populate the parts list."""
+        import time as _time
+        lib = self.library or getattr(self.parent, "library", None)
+        if lib is None:
+            return
+        start = _time.time()
+        results = lib.search_by_lcsc_ids(ids)
+        self.populate_part_list(results, _time.time() - start)
 
     def update_subcategories(self, *_):
         """Update the possible subcategory selection."""
