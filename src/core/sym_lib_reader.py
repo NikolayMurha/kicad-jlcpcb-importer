@@ -324,6 +324,45 @@ def get_footprint_property(symbol_content: str) -> Optional[str]:
     return m.group(1) if m and m.group(1) else None
 
 
+def fix_symbol_label_positions(block: str) -> str:
+    """Move Reference and Value from (0,0,0) to positions outside the symbol body.
+
+    kicad-cli sometimes generates all properties at (at 0 0 0) which places
+    them at the center of the symbol. This function computes a bounding box
+    from pin and geometry coordinates and repositions Reference and Value.
+    """
+    y_vals: list[float] = []
+    for m in re.finditer(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', block):
+        y_vals.append(float(m.group(2)))
+    for m in re.finditer(r'\(pin\b.*?\(at\s+[-\d.]+\s+([-\d.]+)', block, re.DOTALL):
+        y_vals.append(float(m.group(1)))
+    if not y_vals:
+        return block
+
+    MARGIN = 1.27
+    ref_y = round(max(y_vals) + MARGIN, 3)
+    val_y = round(min(y_vals) - MARGIN, 3)
+
+    def _fix_at(blk: str, prop: str, new_y: float) -> str:
+        """Reposition a property only when it's currently at/near (0, 0)."""
+        pat = re.compile(
+            rf'(\(property\s*"{re.escape(prop)}"\s*"[^"]*"\s*)'
+            r'(\(at\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\))',
+            re.DOTALL,
+        )
+        m = pat.search(blk)
+        if not m:
+            return blk
+        x, y = float(m.group(3)), float(m.group(4))
+        if abs(x) < 0.5 and abs(y) < 0.5:
+            return pat.sub(lambda mm: mm.group(1) + f"(at 0 {new_y:.3f} 0)", blk, count=1)
+        return blk
+
+    block = _fix_at(block, "Reference", ref_y)
+    block = _fix_at(block, "Value", val_y)
+    return block
+
+
 def patch_footprint_property(symbol_content: str, new_lib_name: str) -> str:
     """Rewrite Footprint property to point to another footprint library nickname."""
 

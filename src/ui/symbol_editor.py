@@ -230,6 +230,7 @@ class SymbolEditor:
         update_empty_only: bool = True,
         hidden: bool = True,
         exclude_equal_to_value: bool = True,
+        fallback_value: Optional[str] = None,
     ) -> int:
         self._ensure_loaded_block()
         changes = 0
@@ -281,6 +282,14 @@ class SymbolEditor:
                     if modified:
                         changes += 1
 
+        # If Value is still empty, use the fallback (e.g. symbol/part name).
+        if fallback_value:
+            curv = (self._get_prop_value(self._block, "Value") or "").strip()
+            if not curv:
+                self._block, modified = self._set_prop_value(self._block, "Value", fallback_value)
+                if modified:
+                    changes += 1
+
         # Normalize pin style only for explicitly passive-like categories.
         # Do not touch transistor/IC symbols here.
         passive_like = any(
@@ -310,11 +319,12 @@ class SymbolEditor:
         category: str,
         attrs: Optional[Dict[str, str]],
         mfr_part: Optional[str] = None,
+        fallback_value: Optional[str] = None,
     ) -> bool:
         props = dict(attrs or {})
         if mfr_part:
             props.setdefault("Manufacturer Part", mfr_part)
-        return bool(self.apply_properties(props, category=category))
+        return bool(self.apply_properties(props, category=category, fallback_value=fallback_value))
 
     def save(self, strip_ids: bool = True) -> None:
         if self._block_span is None:

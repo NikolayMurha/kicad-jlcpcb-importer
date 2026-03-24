@@ -22,6 +22,7 @@ from ...core.elibz_native import (
 from ...core.sym_lib_reader import (
     add_or_replace_symbol,
     extract_symbol_block,
+    fix_symbol_label_positions,
     get_footprint_property,
     patch_footprint_property,
 )
@@ -210,6 +211,7 @@ class KicadImporter:
                     symbol_name = device_display_name(device_entry) or strip_lcsc_suffix(source_symbol_name)
                     symbol_name = symbol_name or source_symbol_name
                     symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
+                    symbol_block = fix_symbol_label_positions(symbol_block)
                     symbol_block = patch_footprint_property(symbol_block, lib_name)
                     add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
 
@@ -271,6 +273,7 @@ class KicadImporter:
                 symbol_name=symbol_name,
                 category=category,
                 meta=meta or {},
+                fallback_value=symbol_name,
             )
 
             if self.is_system_scope:
@@ -396,6 +399,7 @@ class KicadImporter:
         symbol_name: str,
         category: str,
         meta: Dict,
+        fallback_value: Optional[str] = None,
     ) -> None:
         try:
             attrs = self._parse_attributes_map(str(meta.get("attributes_json") or ""))
@@ -420,6 +424,7 @@ class KicadImporter:
                 category=category,
                 attrs=attrs,
                 mfr_part=mfr_part,
+                fallback_value=fallback_value,
             )
             if changed:
                 editor.save(strip_ids=True)
