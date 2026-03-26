@@ -476,6 +476,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                         msg=f"Batch import finished: {ok_count}/{total} successful.\n"
                     ),
                 )
+                failed_count = total - ok_count
+                wx.CallAfter(self.show_import_status, ok_count, failed_count)
             finally:
                 wx.EndBusyCursor()
                 if btn is not None:

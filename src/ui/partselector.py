@@ -64,7 +64,7 @@ class PartSelectorDialog(wx.Dialog):
         # Row height multiplier (2.0-3.0 recommended)
         self.ROW_HEIGHT_MULTIPLIER = 2.5
         # Explicit thumbnail height in pixels (None = auto via multiplier)
-        self.THUMB_HEIGHT_PX = 60
+        self.THUMB_HEIGHT_PX = 100
         # Parallel thumbnail downloads
         self.THUMB_MAX_WORKERS = 4
         # Prefetch rows ahead of viewport
@@ -617,20 +617,27 @@ class PartSelectorDialog(wx.Dialog):
             0,
         )
         try:
-            # Default state is 60px; clicking expands → show expand icon
+            # Default state is 100px; clicking collapses → show collapse icon
             self.thumb_toggle_button.SetBitmap(
-                loadBitmapScaled("mdi-arrow-expand-vertical.png", self.scale_factor)
+                loadBitmapScaled("mdi-arrow-collapse-vertical.png", self.scale_factor)
             )
             self.thumb_toggle_button.SetBitmapMargins((2, 0))
-            self.thumb_toggle_button.SetToolTip("Increase thumbnail size")
+            self.thumb_toggle_button.SetToolTip("Decrease thumbnail size")
         except Exception:
             pass
         self.thumb_toggle_button.Bind(wx.EVT_BUTTON, self._toggle_thumb_size)
+
+        # Import status label (Success: N  Failed: N) — shown after import, auto-hides
+        self.import_status_label = wx.StaticText(self, wx.ID_ANY, "")
+        self._import_status_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_import_status_timer, self._import_status_timer)
 
         result_sizer = wx.BoxSizer(wx.HORIZONTAL)
         # Place button left to the label with right margin
         result_sizer.Add(self.thumb_toggle_button, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 5)
         result_sizer.Add(self.result_count, 0, wx.TOP | wx.ALIGN_CENTER_VERTICAL, 5)
+        result_sizer.AddStretchSpacer(1)
+        result_sizer.Add(self.import_status_label, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
 
         lcsc.SetSortable(True)
         mfr_number.SetSortable(True)
@@ -729,9 +736,28 @@ class PartSelectorDialog(wx.Dialog):
         # )
         # self.open_lcsc_button.SetBitmapMargins((2, 0))
 
+        self.log_toggle_button = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            wx.DefaultPosition,
+            HighResWxSize(getattr(self.parent, "window", self), wx.Size(36, 36)),
+            0,
+        )
+        try:
+            self.log_toggle_button.SetBitmap(
+                loadBitmapScaled("mdi-console.png", self.scale_factor)
+            )
+            self.log_toggle_button.SetBitmapMargins((2, 0))
+            self.log_toggle_button.SetToolTip("Show/hide log")
+        except Exception:
+            pass
+        self.log_toggle_button.Bind(wx.EVT_BUTTON, self._toggle_log)
+
         tool_sizer = wx.BoxSizer(wx.VERTICAL)
         tool_sizer.Add(self.select_part_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
         tool_sizer.Add(self.part_details_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+        tool_sizer.Add(self.log_toggle_button, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
 
         # Reduce the right column width to button width only
         table_sizer.Add(tool_sizer, 0, wx.TOP | wx.BOTTOM | wx.RIGHT, 5)
@@ -1430,6 +1456,86 @@ class PartSelectorDialog(wx.Dialog):
                 pass
         except Exception:
             self.logger.exception("Failed to toggle advanced filters visibility")
+
+    def _toggle_log(self, *_):
+        """Show or hide the bottom log console."""
+        try:
+            console = getattr(self, "console", None)
+            if console is None:
+                return
+            visible = not console.IsShown()
+            console.Show(visible)
+            # Also show/hide the gauge that sits below the console
+            gauge = getattr(self, "gauge", None)
+            if gauge is not None:
+                gauge.Show(visible)
+            try:
+                if visible:
+                    self.log_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-console.png", self.scale_factor)
+                    )
+                    self.log_toggle_button.SetToolTip("Hide log")
+                else:
+                    self.log_toggle_button.SetBitmap(
+                        loadBitmapScaled("mdi-console-line.png", self.scale_factor)
+                    )
+                    self.log_toggle_button.SetToolTip("Show log")
+            except Exception:
+                pass
+            # Re-layout the entire window
+            top = self
+            while top.GetParent():
+                top = top.GetParent()
+            top.Layout()
+            top.Refresh()
+        except Exception:
+            self.logger.exception("Failed to toggle log panel")
+
+    def show_import_status(self, ok: int, failed: int) -> None:
+        """Display a temporary success/failure summary in the results row."""
+        try:
+            lbl = self.import_status_label
+
+            # Build rich text with colours using wx.richtext or coloured segments.
+            # wx.StaticText only supports a single colour, so we rebuild the label
+            # as two separate StaticText widgets — but they were not pre-created.
+            # Instead, use Unicode coloured indicators + plain text and tint the label.
+            parts = []
+            if ok:
+                parts.append(f"✓ {ok}")
+            if failed:
+                parts.append(f"✗ {failed}")
+            text = "   ".join(parts) if parts else ""
+
+            lbl.SetLabel(text)
+
+            # Colour the whole label: green if no failures, red if any failures,
+            # orange if mixed.
+            if failed == 0 and ok > 0:
+                colour = wx.Colour(34, 139, 34)   # forest green
+            elif ok == 0:
+                colour = wx.Colour(180, 0, 0)      # dark red
+            else:
+                colour = wx.Colour(160, 80, 0)     # amber
+
+            lbl.SetForegroundColour(colour)
+            lbl.SetToolTip(f"Imported: {ok}  Failed: {failed}")
+            lbl.Show()
+            lbl.GetParent().Layout()
+
+            # Auto-hide after 5 s
+            self._import_status_timer.StartOnce(5000)
+        except Exception:
+            self.logger.exception("show_import_status failed")
+
+    def _on_import_status_timer(self, *_):
+        """Hide the import status label after the delay."""
+        try:
+            self.import_status_label.SetLabel("")
+            self.import_status_label.Hide()
+            self.Layout()
+        except Exception:
+            pass
 
     def _update_advanced_toggle_visuals(self):
         """Sync toggle button icon/tooltip with the current visibility state."""
