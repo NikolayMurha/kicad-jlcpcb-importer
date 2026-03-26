@@ -769,7 +769,7 @@ class PartSelectorDialog(wx.Dialog):
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(search_sizer, 1, wx.ALL | wx.EXPAND, 5)
         # layout.Add(self.search_button, 5, wx.ALL, 5)
-        layout.Add(result_sizer, 1, wx.LEFT, 5)
+        layout.Add(result_sizer, 0, wx.LEFT | wx.EXPAND, 5)
         layout.Add(table_sizer, 20, wx.ALL | wx.EXPAND, 5)
 
         # Prepare placeholder bitmap for thumbnails scaled to thumb size
@@ -1500,12 +1500,16 @@ class PartSelectorDialog(wx.Dialog):
             # wx.StaticText only supports a single colour, so we rebuild the label
             # as two separate StaticText widgets — but they were not pre-created.
             # Instead, use Unicode coloured indicators + plain text and tint the label.
-            parts = []
-            if ok:
-                parts.append(f"✓ {ok}")
-            if failed:
-                parts.append(f"✗ {failed}")
-            text = "   ".join(parts) if parts else ""
+            total = ok + failed
+            if total == 1:
+                text = "Imported" if ok else "Failed"
+            else:
+                parts = []
+                if ok:
+                    parts.append(f"{ok} imported")
+                if failed:
+                    parts.append(f"{failed} failed")
+                text = ", ".join(parts)
 
             lbl.SetLabel(text)
 
