@@ -1521,7 +1521,8 @@ class PartSelectorDialog(wx.Dialog):
             lbl.SetForegroundColour(colour)
             lbl.SetToolTip(f"Imported: {ok}  Failed: {failed}")
             lbl.Show()
-            lbl.GetParent().Layout()
+            self.Layout()
+            self.Refresh()
 
             # Auto-hide after 5 s
             self._import_status_timer.StartOnce(5000)

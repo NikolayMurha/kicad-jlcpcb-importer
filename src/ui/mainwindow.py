@@ -533,11 +533,13 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                         msg=f"*********  IMPORT SUCCESS: {lcsc_id}  *********\n{location_label}: {display_path}\n"
                     ),
                 )
+                wx.CallAfter(self.show_import_status, 1, 0)
             else:
                 wx.PostEvent(
                     self,
                     LogboxAppendEvent(msg=f"*********  IMPORT FAILED: {lcsc_id}  *********\n"),
                 )
+                wx.CallAfter(self.show_import_status, 0, 1)
         threading.Thread(target=_worker, daemon=True).start()
 
     def _ensure_library_scope_selected(self) -> Optional[str]:
