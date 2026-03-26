@@ -193,6 +193,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if layout:
             layout.Add(console_sizer, 0, wx.ALL | wx.EXPAND, 5)
             layout.Add(self.gauge, 0, wx.ALL | wx.EXPAND, 5)
+            # Console hidden by default; user opens it via log toggle button
+            self.console.Hide()
+            self.clear_log_button.Hide()
             self.Layout()
 
         # Wire events and actions

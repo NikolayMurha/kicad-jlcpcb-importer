@@ -1534,10 +1534,13 @@ class PartSelectorDialog(wx.Dialog):
             self.logger.exception("show_import_status failed")
 
     def _on_import_status_timer(self, *_):
-        """Hide the import status label after the delay."""
+        """Hide the import status label and reset progress bar after the delay."""
         try:
             self.import_status_label.SetLabel("")
             self.import_status_label.Hide()
+            gauge = getattr(self, "gauge", None)
+            if gauge is not None:
+                gauge.SetValue(0)
             self.Layout()
         except Exception:
             pass
