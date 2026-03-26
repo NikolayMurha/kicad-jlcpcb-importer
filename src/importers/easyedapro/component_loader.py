@@ -39,6 +39,37 @@ def _require_requests():
 
 MODELS_DIR = "3dmodels"
 
+
+def _patch_esym_visibility(data_str: str) -> str:
+    """Make the 'Symbol' (Value) ATTR visible in an .esym JSONL file.
+
+    EasyEDA Pro symbols store per-attribute visibility as a boolean at index 5:
+        ["ATTR", id, parent, name, value, visible, editable, ...]
+    Many downloaded symbols arrive with ``visible=false`` for the "Symbol"
+    attribute, which maps to KiCad's Value and makes it hidden in the schematic.
+    """
+    lines = data_str.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and '"ATTR"' in stripped and '"Symbol"' in stripped:
+            try:
+                record = json.loads(stripped)
+                if (
+                    isinstance(record, list)
+                    and len(record) >= 6
+                    and record[0] == "ATTR"
+                    and record[3] == "Symbol"
+                    and record[5] is False
+                ):
+                    record[5] = True
+                    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                pass
+        result.append(line)
+    return "\n".join(result)
+
+
 # UUID strings can be in the format <uuid>|<owner_uuid>. This function gets the <uuid> part
 def getUuidFirstPart(uuid):
     if not uuid:
@@ -237,26 +268,42 @@ class ComponentLoader():
         for s_uuid, s_data in fetched_symbols.items():
             ds = extractDataStr(s_data)
             if ds:
-                # Patch head.name if it is empty or "~"
+                # Patch Symbol ATTR name (strip LCSC suffix) and visibility.
+                # .esym uses JSONL format (one JSON array per line), so we
+                # patch it line-by-line rather than with json.loads on the whole string.
                 dev_name = sym_uuid_to_name.get(s_uuid, "")
-                if dev_name:
-                    try:
-                        sym_obj = json.loads(ds)
-                        head = sym_obj.get("head") if isinstance(sym_obj, dict) else None
-                        if isinstance(head, dict):
-                            head_name = str(head.get("name", "")).strip()
-                            clean_head_name = strip_lcsc_suffix(head_name)
-                            changed = False
-                            if clean_head_name and clean_head_name != head_name:
-                                head["name"] = clean_head_name
-                                changed = True
-                            elif head_name in ("", "~"):
-                                head["name"] = dev_name
-                                changed = True
-                            if changed:
-                                ds = json.dumps(sym_obj, ensure_ascii=False)
-                    except Exception:
-                        pass
+                patched_lines = []
+                for line in ds.split("\n"):
+                    stripped = line.strip()
+                    if (stripped
+                            and '"ATTR"' in stripped
+                            and '"Symbol"' in stripped):
+                        try:
+                            record = json.loads(stripped)
+                            if (
+                                isinstance(record, list)
+                                and len(record) >= 6
+                                and record[0] == "ATTR"
+                                and record[3] == "Symbol"
+                            ):
+                                # Strip LCSC suffix from value (index 4)
+                                val = str(record[4] or "").strip()
+                                clean = strip_lcsc_suffix(val)
+                                if clean and clean != val:
+                                    record[4] = clean
+                                elif dev_name and (not val or val == "~"):
+                                    record[4] = dev_name
+                                # Ensure visible (index 5)
+                                record[5] = True
+                                line = json.dumps(
+                                    record,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                        except Exception:
+                            pass
+                    patched_lines.append(line)
+                ds = "\n".join(patched_lines)
                 symbol_data_str[s_uuid] = ds
 
             s_data.pop("dataStr", None) # Remove the dataStr field if exists
@@ -293,7 +340,9 @@ class ComponentLoader():
                         if name.endswith('.esym'):
                             symbol_uuid = os.path.splitext(os.path.basename(name))[0]
                             if symbol_uuid not in symbol_data_str:
-                                symbol_data_str[symbol_uuid] = old_zip.read(name).decode('utf-8')
+                                symbol_data_str[symbol_uuid] = _patch_esym_visibility(
+                                    old_zip.read(name).decode("utf-8")
+                                )
                         elif name.endswith('.efoo'):
                             footprint_uuid = os.path.splitext(os.path.basename(name))[0]
                             if footprint_uuid not in footprint_data_str:

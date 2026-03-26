@@ -21,9 +21,11 @@ from ...core.elibz_native import (
 )
 from ...core.sym_lib_reader import (
     add_or_replace_symbol,
+    ensure_value_visible_in_symbol,
     extract_symbol_block,
     fix_symbol_label_positions,
     get_footprint_property,
+    hide_value_in_footprint,
     patch_footprint_property,
 )
 from ...core.events import LogboxAppendEvent
@@ -212,6 +214,7 @@ class KicadImporter:
                     symbol_name = symbol_name or source_symbol_name
                     symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
                     symbol_block = fix_symbol_label_positions(symbol_block)
+                    symbol_block = ensure_value_visible_in_symbol(symbol_block)
                     symbol_block = patch_footprint_property(symbol_block, lib_name)
                     add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
 
@@ -248,6 +251,7 @@ class KicadImporter:
 
                     # kicad-cli writes ${KIPRJMOD}/EASYEDA_MODELS/<model>.step;
                     # rewrite to our configured models directory.
+                    # Also hide the Value property (KiCad convention: Value is hidden on PCB).
                     if footprint_path and footprint_path.exists():
                         model_3d_path = self._model_3d_path(models_dir)
                         try:
@@ -257,6 +261,7 @@ class KicadImporter:
                                 model_3d_path.rstrip("/") + "/",
                                 content,
                             )
+                            content = hide_value_in_footprint(content)
                             footprint_path.write_text(content, encoding="utf-8")
                         except Exception:
                             pass
@@ -429,7 +434,8 @@ class KicadImporter:
             if changed:
                 editor.save(strip_ids=True)
         except Exception as exc:
-            self.log(f"Symbol metadata update skipped: {exc}\n")
+            import traceback
+            self.log(f"Symbol metadata update failed: {exc}\n{traceback.format_exc()}\n")
 
     def _model_3d_path(self, models_dir: Path) -> str:
         if self.is_system_scope:

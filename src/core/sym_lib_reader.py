@@ -363,6 +363,67 @@ def fix_symbol_label_positions(block: str) -> str:
     return block
 
 
+def _property_block_span(text: str, prop_name: str) -> Optional[Tuple[int, int]]:
+    """Return (start, end) byte range of ``(property "prop_name" ...)`` or None."""
+    m = re.search(rf'\(property\s+"{re.escape(prop_name)}"', text)
+    if not m:
+        return None
+    depth, i = 0, m.start()
+    while i < len(text):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return (m.start(), i + 1)
+        i += 1
+    return None
+
+
+def ensure_value_visible_in_symbol(symbol_block: str) -> str:
+    """Remove ``(hide yes)`` from the Value property so it shows in the schematic."""
+    span = _property_block_span(symbol_block, "Value")
+    if not span:
+        return symbol_block
+    s, e = span
+    patched = re.sub(r"\s*\(hide\s+yes\)", "", symbol_block[s:e])
+    return symbol_block[:s] + patched + symbol_block[e:]
+
+
+def hide_value_in_footprint(content: str) -> str:
+    """Add ``(hide yes)`` to the Value property in a .kicad_mod footprint."""
+    span = _property_block_span(content, "Value")
+    if not span:
+        return content
+    s, e = span
+    prop = content[s:e]
+    if "(hide" in prop:
+        return content
+    # Append (hide yes) inside the effects block, or create one.
+    eff_m = re.search(r"\(effects", prop)
+    if eff_m:
+        eff_s = eff_m.start()
+        eff_end = eff_s
+        depth = 0
+        for k, ch in enumerate(prop[eff_s:], eff_s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    eff_end = k
+                    break
+        # Detect indentation from the line that contains '(effects'
+        line_start = prop.rfind("\n", 0, eff_s)
+        indent = re.match(r"[\t ]*", prop[line_start + 1 :]).group() if line_start >= 0 else "\t\t\t"
+        prop = prop[:eff_end] + f"\n{indent}    (hide yes)" + prop[eff_end:]
+    else:
+        line_start = prop.rfind("\n")
+        indent = re.match(r"[\t ]*", prop[line_start + 1 :]).group() if line_start >= 0 else "\t\t"
+        prop = prop[:-1] + f"\n{indent}(effects\n{indent}    (hide yes)\n{indent})"
+    return content[:s] + prop + content[e:]
+
+
 def patch_footprint_property(symbol_content: str, new_lib_name: str) -> str:
     """Rewrite Footprint property to point to another footprint library nickname."""
 
