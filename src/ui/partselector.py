@@ -1465,10 +1465,10 @@ class PartSelectorDialog(wx.Dialog):
                 return
             visible = not console.IsShown()
             console.Show(visible)
-            # Also show/hide the gauge that sits below the console
-            gauge = getattr(self, "gauge", None)
-            if gauge is not None:
-                gauge.Show(visible)
+            # Also hide/show the clear button together with the console
+            clear_btn = getattr(self, "clear_log_button", None)
+            if clear_btn is not None:
+                clear_btn.Show(visible)
             try:
                 if visible:
                     self.log_toggle_button.SetBitmap(
