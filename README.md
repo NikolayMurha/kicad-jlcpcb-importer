@@ -11,9 +11,24 @@ What it does
 
 - Search LCSC/JLCPCB catalog and assign LCSC numbers to footprints
 - Import symbols, footprints, and 3D models via the EasyEDA ComponentLoader backend
+- In `KiCad` output mode: try matching built-in KiCad symbols/footprints first (common R/C/L/diode/transistor/IC), then fallback to EasyEDA conversion
 - Choose where to store generated libraries: Project or System (KiCad 9 3rd‑party locations)
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
 - Configurable library prefix (default: `JLCPCB`) and project library folder (default: `library`)
+
+### KiCad-first mapping settings
+
+When `general.lib_format = "kicad"`:
+
+- `general.kicad_builtin_first` (default `true`) enables built-in KiCad lookup before EasyEDA fallback.
+- Symbol index cache is persisted to plugin folder (`<plugin>/cache/kicad_symbol_index_v1.json`) with TTL.
+- `general.kicad_symbol_index_ttl_sec` (default `86400`) controls symbol index cache lifetime.
+- `general.kicad_symbol_index_max_libs` limits number of symbol libraries used for index building.
+- `general.kicad_footprint_fuzzy_max_libs` / `general.kicad_footprint_fuzzy_max_files_per_lib` limit fuzzy footprint scanning.
+- `general.kicad_symbol_map` maps logical component kinds (`resistor`, `capacitor`, `bjt`, `ic`, ...) to preferred symbol refs like `Device:R` or `Transistor_BJT:Q_NPN_BCE`.
+- `general.kicad_footprint_map` can pin preferred footprint refs or libraries (supports `${package}` placeholder), for example:
+  - `["Resistor_SMD:R_${package}_*"]`
+  - `["Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"]`
 
 ## Limitations
 

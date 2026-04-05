@@ -84,6 +84,40 @@ def loadIconScaled(filename, scale=1.0):
     return wx.Icon(bmp)
 
 
+def apply_button_label_tooltips(window, overwrite: bool = True):
+    """Apply button tooltips from button labels for all buttons in a window tree."""
+    if window is None:
+        return
+    stack = [window]
+    while stack:
+        current = stack.pop()
+        try:
+            children = list(current.GetChildren())
+        except Exception:
+            children = []
+        stack.extend(children)
+
+        if not isinstance(current, wx.Button):
+            continue
+        try:
+            label = str(current.GetLabel() or "").strip()
+        except Exception:
+            label = ""
+        if not label:
+            continue
+        if not overwrite:
+            try:
+                existing = str(current.GetToolTipText() or "").strip()
+            except Exception:
+                existing = ""
+            if existing:
+                continue
+        try:
+            current.SetToolTip(label)
+        except Exception:
+            continue
+
+
 def natural_sort_collation(a, b):
     """Natural sort collation for use in sqlite."""
     if a == b:

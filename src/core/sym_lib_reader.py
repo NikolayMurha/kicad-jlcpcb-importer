@@ -55,6 +55,13 @@ def resolve_uri(uri: str, project_path: Optional[Path] = None, table_dir: Option
             result = result.replace(f"${{KICAD{ver}_SYMBOL_DIR}}", sym_dirs[0])
         if fp_dirs:
             result = result.replace(f"${{KICAD{ver}_FOOTPRINT_DIR}}", fp_dirs[0])
+    # Resolve ${KICADx_3RD_PARTY} → user settings path / "3rdparty"
+    if "${KICAD" in result and "3RD_PARTY" in result:
+        user_settings = get_user_settings_path()
+        if user_settings:
+            third_party = str(user_settings / "3rdparty")
+            for ver in ("10", "9", "8", "7", "6"):
+                result = result.replace(f"${{KICAD{ver}_3RD_PARTY}}", third_party)
     p = Path(result)
     if not p.is_absolute() and table_dir is not None:
         p = (Path(table_dir) / p).resolve()
@@ -124,18 +131,23 @@ def parse_lib_table(path: Path) -> List[Tuple[str, str, str]]:
     return entries
 
 
-def get_connected_sym_libs(project_path: Optional[Path] = None) -> List[Tuple[str, Path]]:
+def get_connected_sym_libs(
+    project_path: Optional[Path] = None,
+    include_project_tables: bool = True,
+    include_user_tables: bool = False,
+) -> List[Tuple[str, Path]]:
     """Return connected KiCad symbol libraries as (name, resolved_path)."""
     table_paths: List[Path] = []
-    if project_path is not None:
+    if include_project_tables and project_path is not None:
         t = project_path / "sym-lib-table"
         if t.exists():
             table_paths.append(t)
-    user = get_user_settings_path()
-    if user:
-        t = user / "sym-lib-table"
-        if t.exists():
-            table_paths.append(t)
+    if include_user_tables:
+        user = get_user_settings_path()
+        if user:
+            t = user / "sym-lib-table"
+            if t.exists():
+                table_paths.append(t)
 
     seen: set[str] = set()
     result: List[Tuple[str, Path]] = []
@@ -161,18 +173,23 @@ def get_connected_sym_libs(project_path: Optional[Path] = None) -> List[Tuple[st
     return result
 
 
-def get_connected_fp_libs(project_path: Optional[Path] = None) -> List[Tuple[str, Path]]:
+def get_connected_fp_libs(
+    project_path: Optional[Path] = None,
+    include_project_tables: bool = True,
+    include_user_tables: bool = False,
+) -> List[Tuple[str, Path]]:
     """Return connected KiCad footprint libraries as (name, resolved_path)."""
     table_paths: List[Path] = []
-    if project_path is not None:
+    if include_project_tables and project_path is not None:
         t = project_path / "fp-lib-table"
         if t.exists():
             table_paths.append(t)
-    user = get_user_settings_path()
-    if user:
-        t = user / "fp-lib-table"
-        if t.exists():
-            table_paths.append(t)
+    if include_user_tables:
+        user = get_user_settings_path()
+        if user:
+            t = user / "fp-lib-table"
+            if t.exists():
+                table_paths.append(t)
 
     seen: set[str] = set()
     result: List[Tuple[str, Path]] = []
@@ -186,21 +203,34 @@ def get_connected_fp_libs(project_path: Optional[Path] = None) -> List[Tuple[str
             if p.exists():
                 seen.add(name)
                 result.append((name, p))
+
+    # Fallback to built-ins so importers can resolve standard KiCad footprints
+    # even when fp-lib-table does not contain explicit entries.
+    for fp_dir in _kicad_dirs("FOOTPRINT"):
+        for pretty in sorted(Path(fp_dir).glob("*.pretty")):
+            name = pretty.stem
+            if name not in seen:
+                seen.add(name)
+                result.append((name, pretty))
     return result
 
 
-def get_connected_elibz_libs(project_path: Optional[Path] = None) -> List[Tuple[str, Path]]:
+def get_connected_elibz_libs(
+    project_path: Optional[Path] = None,
+    include_user_tables: bool = False,
+) -> List[Tuple[str, Path]]:
     """Return connected EasyEDA Pro symbol libraries as (name, resolved_path)."""
     table_paths: List[Path] = []
     if project_path is not None:
         t = project_path / "sym-lib-table"
         if t.exists():
             table_paths.append(t)
-    user = get_user_settings_path()
-    if user:
-        t = user / "sym-lib-table"
-        if t.exists():
-            table_paths.append(t)
+    if include_user_tables:
+        user = get_user_settings_path()
+        if user:
+            t = user / "sym-lib-table"
+            if t.exists():
+                table_paths.append(t)
 
     seen: set[str] = set()
     result: List[Tuple[str, Path]] = []
@@ -318,6 +348,53 @@ def _extract_from_content(content: str, symbol_name: str) -> Optional[str]:
     return None
 
 
+def _symbol_extends_name(symbol_block: str) -> Optional[str]:
+    """Return parent symbol name from ``(extends "...")`` if present."""
+    m = re.search(r'\(extends\s+"([^"]+)"', symbol_block)
+    if not m:
+        return None
+    parent = str(m.group(1) or "").strip()
+    if ":" in parent:
+        parent = parent.split(":", 1)[1].strip()
+    return parent or None
+
+
+def extract_parent_symbol_chain(lib_path: Path, symbol_name: str, max_depth: int = 24) -> List[Tuple[str, str]]:
+    """Return parent symbols for ``symbol_name`` in parent-first order.
+
+    The returned list contains tuples ``(parent_name, parent_block)`` and does
+    not include ``symbol_name`` itself.
+    """
+    try:
+        content = lib_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    wanted = str(symbol_name or "").strip()
+    if not wanted:
+        return []
+
+    result: List[Tuple[str, str]] = []
+    seen: set[str] = {wanted}
+    current = wanted
+    depth = 0
+    while depth < max_depth:
+        child_block = _extract_from_content(content, current)
+        if not child_block:
+            break
+        parent = _symbol_extends_name(child_block)
+        if not parent or parent in seen:
+            break
+        parent_block = _extract_from_content(content, parent)
+        if not parent_block:
+            break
+        result.insert(0, (parent, parent_block))
+        seen.add(parent)
+        current = parent
+        depth += 1
+    return result
+
+
 def get_footprint_property(symbol_content: str) -> Optional[str]:
     """Return Footprint property value from symbol block."""
     m = re.search(r'\(property\s+"Footprint"\s+"([^"]*)"', symbol_content)
@@ -433,6 +510,44 @@ def patch_footprint_property(symbol_content: str, new_lib_name: str) -> str:
         return m.group(0).replace(f'"{old_ref}"', f'"{new_ref}"', 1)
 
     return re.sub(r'\(property\s+"Footprint"\s+"([^"]*)"', _replace, symbol_content)
+
+
+def set_footprint_property(symbol_content: str, fp_ref: str) -> str:
+    """Set Footprint property to ``fp_ref`` (``Lib:Name``), creating it if needed."""
+    fp_ref = str(fp_ref or "").strip()
+    if not fp_ref:
+        return symbol_content
+
+    # Replace existing Footprint value if present.
+    if re.search(r'\(property\s+"Footprint"\s+"[^"]*"', symbol_content):
+        return re.sub(
+            r'(\(property\s+"Footprint"\s+")([^"]*)(")',
+            lambda m: m.group(1) + fp_ref + m.group(3),
+            symbol_content,
+            count=1,
+        )
+
+    # Insert a hidden Footprint property before first nested unit symbol, or
+    # before the closing ')' of the symbol block.
+    indent = "    "
+    m_indent = re.search(r'(?m)^(\s*)\(property\s+"[^"]+"', symbol_content)
+    if m_indent:
+        indent = m_indent.group(1)
+    prop_block = (
+        f'{indent}(property "Footprint" "{fp_ref}" (at 0 0 0)\n'
+        f"{indent}  (effects (font (size 1.27 1.27)) (hide yes))\n"
+        f"{indent})\n"
+    )
+
+    nested = re.search(r'(?m)^\s+\(symbol\s+"[^"]+_[0-9_]+"', symbol_content)
+    if nested:
+        at = nested.start()
+        return symbol_content[:at] + prop_block + symbol_content[at:]
+
+    end = symbol_content.rfind(")")
+    if end >= 0:
+        return symbol_content[:end] + "\n" + prop_block + symbol_content[end:]
+    return symbol_content + "\n" + prop_block
 
 
 _KICAD_SYM_HEADER = (

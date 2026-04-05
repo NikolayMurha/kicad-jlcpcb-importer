@@ -7,16 +7,645 @@ from pathlib import Path
 import wx  # pylint: disable=import-error
 
 from ..core.events import UpdateSetting
-from ..core.helpers import HighResWxSize, loadBitmapScaled
-from ..core.lib_tables import LibTablesManager
+from ..core.helpers import HighResWxSize, loadBitmapScaled, apply_button_label_tooltips
 from ..core.lib_paths import (
     DEFAULT_LIB_PATH,
     DEFAULT_LIB_DIR_NAME,
     resolve_group_by_category,
-    resolve_lib_root,
     resolve_library_base_name,
 )
-from ..core.sym_lib_reader import get_user_settings_path
+
+
+class MappingIndexSettingsDialog(wx.Dialog):
+    """Dialog for KiCad mapping and indexing settings."""
+
+    _DEFAULT_KINDS = [
+        "default",
+        "resistor",
+        "capacitor",
+        "inductor",
+        "diode",
+        "led",
+        "bjt",
+        "fet",
+        "ic",
+    ]
+
+    def __init__(self, parent, general: dict):
+        wx.Dialog.__init__(
+            self,
+            parent,
+            id=wx.ID_ANY,
+            title="KiCad Mapping and Indexing Settings",
+            pos=wx.DefaultPosition,
+            size=HighResWxSize(parent.window, wx.Size(760, 820)),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
+        )
+        self._main_window = parent
+        # Proxy fields so nested pickers can use this dialog as parent while
+        # still accessing project/settings context expected by LibraryManagerDialog.
+        self.window = getattr(parent, "window", parent)
+        self.settings = getattr(parent, "settings", {})
+        self.project_path = getattr(parent, "project_path", "")
+        self._symbol_map_model = self._normalize_map_dict(general.get("kicad_symbol_map"))
+        self._footprint_map_model = self._normalize_map_dict(general.get("kicad_footprint_map"))
+        self._values = {}
+
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        self.kicad_builtin_first_ctrl = wx.CheckBox(
+            self,
+            wx.ID_ANY,
+            "Prefer KiCad built-in symbol/footprint mapping before EasyEDA import",
+        )
+        self.kicad_builtin_first_ctrl.SetValue(self._as_bool(general.get("kicad_builtin_first"), True))
+        root.Add(self.kicad_builtin_first_ctrl, 0, wx.ALL | wx.EXPAND, 8)
+
+        grid = wx.FlexGridSizer(11, 2, 8, 12)
+        grid.AddGrowableCol(1, 1)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Symbol index max libraries:")
+        label.SetToolTip("Maximum number of symbol libraries scanned while building the symbol index.")
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.symbol_index_max_libs_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=20,
+            max=5000,
+            initial=self._as_int(general.get("kicad_symbol_index_max_libs"), 300, 20, 5000),
+        )
+        self.symbol_index_max_libs_ctrl.SetToolTip("Maximum number of symbol libraries scanned while building the symbol index.")
+        grid.Add(self.symbol_index_max_libs_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Symbol index cache TTL (seconds):")
+        label.SetToolTip("How long to keep the symbol index cache. 0 disables time-based expiration.")
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.symbol_index_ttl_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=31536000,
+            initial=self._as_int(general.get("kicad_symbol_index_ttl_sec"), 86400, 0, 31536000),
+        )
+        self.symbol_index_ttl_ctrl.SetToolTip("How long to keep the symbol index cache. 0 disables time-based expiration.")
+        grid.Add(self.symbol_index_ttl_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy scan max libraries:")
+        label.SetToolTip("Maximum number of footprint libraries scanned during fuzzy footprint matching.")
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_max_libs_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=1,
+            max=1000,
+            initial=self._as_int(general.get("kicad_footprint_fuzzy_max_libs"), 12, 1, 1000),
+        )
+        self.fp_fuzzy_max_libs_ctrl.SetToolTip("Maximum number of footprint libraries scanned during fuzzy footprint matching.")
+        grid.Add(self.fp_fuzzy_max_libs_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy scan max files per library:")
+        label.SetToolTip("Maximum .kicad_mod files scanned per library during fuzzy footprint matching.")
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_max_files_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=100,
+            max=200000,
+            initial=self._as_int(
+                general.get("kicad_footprint_fuzzy_max_files_per_lib"),
+                2500,
+                100,
+                200000,
+            ),
+        )
+        self.fp_fuzzy_max_files_ctrl.SetToolTip("Maximum .kicad_mod files scanned per library during fuzzy footprint matching.")
+        grid.Add(self.fp_fuzzy_max_files_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Symbol wildcard min score:")
+        label.SetToolTip(
+            "Minimum score for wildcard symbol candidates (example: PART*). "
+            "Higher value reduces false positives but increases misses."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.symbol_wildcard_min_score_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=500,
+            initial=self._as_int(general.get("kicad_symbol_wildcard_min_score"), 80, 0, 500),
+        )
+        self.symbol_wildcard_min_score_ctrl.SetToolTip(
+            "Minimum score for wildcard symbol candidates (example: PART*). "
+            "Higher value reduces false positives but increases misses."
+        )
+        grid.Add(self.symbol_wildcard_min_score_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Symbol wildcard min gap:")
+        label.SetToolTip(
+            "Minimum score gap between the best and second wildcard symbol candidate. "
+            "If gap is too small, match is rejected as ambiguous."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.symbol_wildcard_min_gap_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=200,
+            initial=self._as_int(general.get("kicad_symbol_wildcard_min_gap"), 14, 0, 200),
+        )
+        self.symbol_wildcard_min_gap_ctrl.SetToolTip(
+            "Minimum score gap between the best and second wildcard symbol candidate. "
+            "If gap is too small, match is rejected as ambiguous."
+        )
+        grid.Add(self.symbol_wildcard_min_gap_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy min score (passive):")
+        label.SetToolTip(
+            "Minimum fuzzy score for passives (R/C/L/diode/LED/transistor families). "
+            "Higher value is stricter and reduces false positives."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_min_score_passive_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=400,
+            initial=self._as_int(general.get("kicad_footprint_fuzzy_min_score_passive"), 70, 0, 400),
+        )
+        self.fp_fuzzy_min_score_passive_ctrl.SetToolTip(
+            "Minimum fuzzy score for passives (R/C/L/diode/LED/transistor families). "
+            "Higher value is stricter and reduces false positives."
+        )
+        grid.Add(self.fp_fuzzy_min_score_passive_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy min score (IC):")
+        label.SetToolTip(
+            "Minimum fuzzy score for IC-like packages. "
+            "Higher value is stricter and reduces false positives."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_min_score_ic_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=400,
+            initial=self._as_int(general.get("kicad_footprint_fuzzy_min_score_ic"), 95, 0, 400),
+        )
+        self.fp_fuzzy_min_score_ic_ctrl.SetToolTip(
+            "Minimum fuzzy score for IC-like packages. "
+            "Higher value is stricter and reduces false positives."
+        )
+        grid.Add(self.fp_fuzzy_min_score_ic_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy min gap (passive):")
+        label.SetToolTip(
+            "Minimum score difference between best and second passive footprint candidate. "
+            "Smaller gap is treated as ambiguous and rejected."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_min_gap_passive_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=200,
+            initial=self._as_int(general.get("kicad_footprint_fuzzy_min_gap_passive"), 16, 0, 200),
+        )
+        self.fp_fuzzy_min_gap_passive_ctrl.SetToolTip(
+            "Minimum score difference between best and second passive footprint candidate. "
+            "Smaller gap is treated as ambiguous and rejected."
+        )
+        grid.Add(self.fp_fuzzy_min_gap_passive_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint fuzzy min gap (non-passive):")
+        label.SetToolTip(
+            "Minimum score difference between best and second non-passive candidate. "
+            "Smaller gap is treated as ambiguous and rejected."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_fuzzy_min_gap_nonpassive_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=200,
+            initial=self._as_int(general.get("kicad_footprint_fuzzy_min_gap_nonpassive"), 12, 0, 200),
+        )
+        self.fp_fuzzy_min_gap_nonpassive_ctrl.SetToolTip(
+            "Minimum score difference between best and second non-passive candidate. "
+            "Smaller gap is treated as ambiguous and rejected."
+        )
+        grid.Add(self.fp_fuzzy_min_gap_nonpassive_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Footprint strict package+pin min gap:")
+        label.SetToolTip(
+            "Minimum score difference for strict package+pin pass (example QFN-44, SOT-23-5). "
+            "If candidates are too close, strict match is rejected as ambiguous."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_strict_pkg_pin_min_gap_ctrl = wx.SpinCtrl(
+            self,
+            wx.ID_ANY,
+            min=0,
+            max=200,
+            initial=self._as_int(general.get("kicad_footprint_strict_pkg_pin_min_gap"), 14, 0, 200),
+        )
+        self.fp_strict_pkg_pin_min_gap_ctrl.SetToolTip(
+            "Minimum score difference for strict package+pin pass (example QFN-44, SOT-23-5). "
+            "If candidates are too close, strict match is rejected as ambiguous."
+        )
+        grid.Add(self.fp_strict_pkg_pin_min_gap_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Require package token overlap:")
+        label.SetToolTip(
+            "Require overlap between extracted package tokens and footprint name tokens in fuzzy/strict passes. "
+            "Keeps matching conservative and reduces false positives."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_require_keyword_overlap_ctrl = wx.CheckBox(self, wx.ID_ANY, "")
+        self.fp_require_keyword_overlap_ctrl.SetValue(
+            self._as_bool(general.get("kicad_footprint_require_keyword_overlap"), True)
+        )
+        self.fp_require_keyword_overlap_ctrl.SetToolTip(
+            "Require overlap between extracted package tokens and footprint name tokens in fuzzy/strict passes. "
+            "Keeps matching conservative and reduces false positives."
+        )
+        grid.Add(self.fp_require_keyword_overlap_ctrl, 1, wx.EXPAND)
+
+        label = wx.StaticText(self, wx.ID_ANY, "Passive size-hint strict mode:")
+        label.SetToolTip(
+            "When passive package size hint exists (example 0402/1005), require strict chip-size match. "
+            "If strict match is missing, fuzzy fallback is skipped."
+        )
+        grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fp_passive_size_strict_mode_ctrl = wx.CheckBox(self, wx.ID_ANY, "")
+        self.fp_passive_size_strict_mode_ctrl.SetValue(
+            self._as_bool(general.get("kicad_footprint_passive_size_strict_mode"), True)
+        )
+        self.fp_passive_size_strict_mode_ctrl.SetToolTip(
+            "When passive package size hint exists (example 0402/1005), require strict chip-size match. "
+            "If strict match is missing, fuzzy fallback is skipped."
+        )
+        grid.Add(self.fp_passive_size_strict_mode_ctrl, 1, wx.EXPAND)
+        root.Add(grid, 0, wx.ALL | wx.EXPAND, 8)
+
+        guidance = wx.StaticText(
+            self,
+            wx.ID_ANY,
+            (
+                "How it works: entries in these lists are checked first for matching component kinds. "
+                "If nothing matches, importer falls back to fuzzy footprint matching, "
+                "then to EasyEDA import."
+            ),
+        )
+        guidance.Wrap(HighResWxSize(parent.window, wx.Size(700, -1)).GetWidth())
+        root.Add(guidance, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+
+        self._build_mapping_section(
+            root,
+            item_kind="symbol",
+            title="Symbol Mapping Priority",
+            insert_button_label="Insert Symbol from Libraries",
+        )
+        self._build_mapping_section(
+            root,
+            item_kind="footprint",
+            title="Footprint Mapping Priority",
+            insert_button_label="Insert Footprint from Libraries",
+        )
+
+        btn_sizer = self.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
+        if btn_sizer is not None:
+            root.Add(btn_sizer, 0, wx.ALL | wx.EXPAND, 8)
+        self.SetSizer(root)
+        self._refresh_map_list("symbol")
+        self._refresh_map_list("footprint")
+        self.Layout()
+        self.CentreOnParent()
+        apply_button_label_tooltips(self, overwrite=False)
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+
+    @staticmethod
+    def _as_bool(value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off"):
+                return False
+        return default
+
+    @staticmethod
+    def _as_int(value, default: int, min_v: int, max_v: int) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        return max(min_v, min(max_v, parsed))
+
+    @staticmethod
+    def _normalize_kind(raw_value: str) -> str:
+        kind = str(raw_value or "").strip().lower()
+        return kind or "default"
+
+    @staticmethod
+    def _normalize_map_dict(value) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for key, entry in value.items():
+            kind = MappingIndexSettingsDialog._normalize_kind(str(key))
+            if isinstance(entry, (list, tuple)):
+                items_raw = list(entry)
+            else:
+                items_raw = [entry]
+            items = []
+            for item in items_raw:
+                text = str(item or "").strip()
+                if text and text not in items:
+                    items.append(text)
+            if items:
+                out[kind] = items
+        return out
+
+    def _build_mapping_section(
+        self,
+        root: wx.BoxSizer,
+        item_kind: str,
+        title: str,
+        insert_button_label: str,
+    ) -> None:
+        section = wx.StaticBoxSizer(wx.VERTICAL, self, label=title)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(self, wx.ID_ANY, "Component kind:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        kind_ctrl = wx.ComboBox(
+            self,
+            wx.ID_ANY,
+            "default",
+            choices=self._DEFAULT_KINDS,
+            style=wx.CB_READONLY,
+        )
+        kind_ctrl.Bind(wx.EVT_COMBOBOX, lambda _evt, k=item_kind: self._refresh_map_list(k))
+        row.Add(kind_ctrl, 1, wx.EXPAND)
+        section.Add(row, 0, wx.ALL | wx.EXPAND, 6)
+
+        list_ctrl = wx.ListBox(self, wx.ID_ANY)
+        list_ctrl.SetMinSize(HighResWxSize(self.window, wx.Size(-1, 120)))
+        section.Add(list_ctrl, 1, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
+
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+
+        insert_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        insert_btn.SetBitmap(loadBitmapScaled("mdi-database-import-outline.png", self._main_window.scale_factor))
+        insert_btn.SetBitmapMargins((2, 0))
+        insert_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_insert_from_libraries(k))
+        buttons.Add(insert_btn, 0, wx.RIGHT, 4)
+
+        add_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        add_btn.SetBitmap(loadBitmapScaled("mdi-plus.png", self._main_window.scale_factor))
+        add_btn.SetBitmapMargins((2, 0))
+        add_btn.SetMinSize(HighResWxSize(self.window, wx.Size(36, 28)))
+        add_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_add_entry(k))
+        buttons.Add(add_btn, 0, wx.RIGHT, 4)
+
+        edit_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        edit_btn.SetBitmap(loadBitmapScaled("mdi-pencil.png", self._main_window.scale_factor))
+        edit_btn.SetBitmapMargins((2, 0))
+        edit_btn.SetMinSize(HighResWxSize(self.window, wx.Size(36, 28)))
+        edit_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_edit_entry(k))
+        buttons.Add(edit_btn, 0, wx.RIGHT, 4)
+
+        remove_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        remove_btn.SetBitmap(loadBitmapScaled("mdi-trash-can-outline.png", self._main_window.scale_factor))
+        remove_btn.SetBitmapMargins((2, 0))
+        remove_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_remove_entry(k))
+        buttons.Add(remove_btn, 0, wx.RIGHT, 4)
+        
+        up_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        up_btn.SetBitmap(loadBitmapScaled("mdi-chevron-up.png", self._main_window.scale_factor))
+        up_btn.SetBitmapMargins((2, 0))
+        up_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_move_entry(k, -1))
+        buttons.Add(up_btn, 0, wx.RIGHT, 4)
+
+        down_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "",
+            size=HighResWxSize(self.window, wx.Size(36, 28)),
+        )
+        down_btn.SetBitmap(loadBitmapScaled("mdi-chevron-down.png", self._main_window.scale_factor))
+        down_btn.SetBitmapMargins((2, 0))
+        down_btn.Bind(wx.EVT_BUTTON, lambda _evt, k=item_kind: self._on_move_entry(k, 1))
+        buttons.Add(down_btn, 0)
+        
+        insert_btn.SetToolTip("Insert from Libraries")
+        add_btn.SetToolTip("Add Entry")
+        edit_btn.SetToolTip("Edit Entry")
+        remove_btn.SetToolTip("Remove Entry")
+        up_btn.SetToolTip("Move Up")
+        down_btn.SetToolTip("Move Down")
+        section.Add(buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
+
+        setattr(self, f"{item_kind}_kind_ctrl", kind_ctrl)
+        setattr(self, f"{item_kind}_list_ctrl", list_ctrl)
+        root.Add(section, 1, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+
+    def _model_for_kind(self, item_kind: str) -> dict:
+        return self._symbol_map_model if item_kind == "symbol" else self._footprint_map_model
+
+    def _current_kind(self, item_kind: str) -> str:
+        ctrl = getattr(self, f"{item_kind}_kind_ctrl")
+        return self._normalize_kind(ctrl.GetValue())
+
+    def _current_entries(self, item_kind: str) -> list[str]:
+        model = self._model_for_kind(item_kind)
+        return list(model.get(self._current_kind(item_kind), []))
+
+    def _store_entries(self, item_kind: str, entries: list[str]) -> None:
+        model = self._model_for_kind(item_kind)
+        kind = self._current_kind(item_kind)
+        cleaned = [str(v or "").strip() for v in entries if str(v or "").strip()]
+        unique: list[str] = []
+        for entry in cleaned:
+            if entry not in unique:
+                unique.append(entry)
+        if unique:
+            model[kind] = unique
+        elif kind in model:
+            del model[kind]
+
+    def _refresh_map_list(self, item_kind: str) -> None:
+        list_ctrl: wx.ListBox = getattr(self, f"{item_kind}_list_ctrl")
+        list_ctrl.Clear()
+        for entry in self._current_entries(item_kind):
+            list_ctrl.Append(entry)
+
+    def _pick_library_refs(self, item_kind: str) -> list[str]:
+        from .library_panel import LibraryManagerDialog
+
+        dlg = None
+        try:
+            dlg = LibraryManagerDialog(
+                self,
+                picker_mode=True,
+                picker_kind=item_kind,
+            )
+            if dlg.ShowModal() != wx.ID_OK:
+                return []
+            refs: list[str] = []
+            for name, _desc, _src_path, src_alias, _fp_label, _has3d in dlg.get_picked_items():
+                alias = str(src_alias or "").strip()
+                symbol_or_fp = str(name or "").strip()
+                if not alias or not symbol_or_fp:
+                    continue
+                ref = f"{alias}:{symbol_or_fp}"
+                if ref not in refs:
+                    refs.append(ref)
+            return refs
+        finally:
+            if dlg is not None:
+                dlg.Destroy()
+
+    def _append_refs_to_model(self, item_kind: str, refs: list[str]) -> None:
+        if not refs:
+            return
+        bucket = self._current_entries(item_kind)
+        for ref in refs:
+            if ref not in bucket:
+                bucket.append(ref)
+        self._store_entries(item_kind, bucket)
+        self._refresh_map_list(item_kind)
+
+    def _on_insert_from_libraries(self, item_kind: str):
+        self._append_refs_to_model(item_kind, self._pick_library_refs(item_kind))
+
+    def _on_add_entry(self, item_kind: str):
+        dlg = wx.TextEntryDialog(
+            self,
+            f"Enter {item_kind} reference (for example Lib:Name):",
+            "Add Mapping Entry",
+            "",
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            value = str(dlg.GetValue() or "").strip()
+            if not value:
+                return
+            self._append_refs_to_model(item_kind, [value])
+        finally:
+            dlg.Destroy()
+
+    def _on_edit_entry(self, item_kind: str):
+        list_ctrl: wx.ListBox = getattr(self, f"{item_kind}_list_ctrl")
+        idx = list_ctrl.GetSelection()
+        if idx == wx.NOT_FOUND:
+            return
+        entries = self._current_entries(item_kind)
+        if idx < 0 or idx >= len(entries):
+            return
+        dlg = wx.TextEntryDialog(
+            self,
+            f"Edit {item_kind} reference:",
+            "Edit Mapping Entry",
+            entries[idx],
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            value = str(dlg.GetValue() or "").strip()
+            if not value:
+                return
+            entries[idx] = value
+            self._store_entries(item_kind, entries)
+            self._refresh_map_list(item_kind)
+            list_ctrl.SetSelection(idx)
+        finally:
+            dlg.Destroy()
+
+    def _on_remove_entry(self, item_kind: str):
+        list_ctrl: wx.ListBox = getattr(self, f"{item_kind}_list_ctrl")
+        idx = list_ctrl.GetSelection()
+        if idx == wx.NOT_FOUND:
+            return
+        entries = self._current_entries(item_kind)
+        if idx < 0 or idx >= len(entries):
+            return
+        entries.pop(idx)
+        self._store_entries(item_kind, entries)
+        self._refresh_map_list(item_kind)
+        if entries:
+            list_ctrl.SetSelection(min(idx, len(entries) - 1))
+
+    def _on_move_entry(self, item_kind: str, step: int):
+        list_ctrl: wx.ListBox = getattr(self, f"{item_kind}_list_ctrl")
+        idx = list_ctrl.GetSelection()
+        if idx == wx.NOT_FOUND:
+            return
+        entries = self._current_entries(item_kind)
+        if idx < 0 or idx >= len(entries):
+            return
+        new_idx = idx + int(step)
+        if new_idx < 0 or new_idx >= len(entries):
+            return
+        entries[idx], entries[new_idx] = entries[new_idx], entries[idx]
+        self._store_entries(item_kind, entries)
+        self._refresh_map_list(item_kind)
+        list_ctrl.SetSelection(new_idx)
+
+    def _on_ok(self, _evt):
+        self._values = {
+            "kicad_builtin_first": bool(self.kicad_builtin_first_ctrl.GetValue()),
+            "kicad_symbol_index_max_libs": int(self.symbol_index_max_libs_ctrl.GetValue()),
+            "kicad_symbol_index_ttl_sec": int(self.symbol_index_ttl_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_max_libs": int(self.fp_fuzzy_max_libs_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_max_files_per_lib": int(self.fp_fuzzy_max_files_ctrl.GetValue()),
+            "kicad_symbol_wildcard_min_score": int(self.symbol_wildcard_min_score_ctrl.GetValue()),
+            "kicad_symbol_wildcard_min_gap": int(self.symbol_wildcard_min_gap_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_min_score_passive": int(self.fp_fuzzy_min_score_passive_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_min_score_ic": int(self.fp_fuzzy_min_score_ic_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_min_gap_passive": int(self.fp_fuzzy_min_gap_passive_ctrl.GetValue()),
+            "kicad_footprint_fuzzy_min_gap_nonpassive": int(self.fp_fuzzy_min_gap_nonpassive_ctrl.GetValue()),
+            "kicad_footprint_strict_pkg_pin_min_gap": int(self.fp_strict_pkg_pin_min_gap_ctrl.GetValue()),
+            "kicad_footprint_require_keyword_overlap": bool(self.fp_require_keyword_overlap_ctrl.GetValue()),
+            "kicad_footprint_passive_size_strict_mode": bool(self.fp_passive_size_strict_mode_ctrl.GetValue()),
+            "kicad_symbol_map": self._normalize_map_dict(self._symbol_map_model),
+            "kicad_footprint_map": self._normalize_map_dict(self._footprint_map_model),
+        }
+        self.EndModal(wx.ID_OK)
+
+    def get_values(self) -> dict:
+        return dict(self._values)
 
 
 class SettingsDialog(wx.Dialog):
@@ -111,6 +740,30 @@ class SettingsDialog(wx.Dialog):
         group_row.Add(self.group_by_category_ctrl, 1, wx.EXPAND)
         gen_box.Add(group_row, 0, wx.ALL | wx.EXPAND, 5)
 
+        hide_btn_labels_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.hide_button_labels_ctrl = wx.CheckBox(
+            self,
+            wx.ID_ANY,
+            "Hide Labels on Buttons",
+            name="general_hide_button_labels",
+        )
+        self.hide_button_labels_ctrl.SetToolTip(wx.ToolTip("Hide text labels on top toolbar and Search button."))
+        self.hide_button_labels_ctrl.Bind(wx.EVT_CHECKBOX, self.update_settings)
+        hide_btn_labels_row.Add(self.hide_button_labels_ctrl, 1, wx.EXPAND)
+        gen_box.Add(hide_btn_labels_row, 0, wx.ALL | wx.EXPAND, 5)
+
+        debug_log_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.debug_log_ctrl = wx.CheckBox(
+            self,
+            wx.ID_ANY,
+            "Debug Log (include JSON payloads)",
+            name="general_debug_log",
+        )
+        self.debug_log_ctrl.SetToolTip(wx.ToolTip("Enable verbose debug JSON output in plugin logs."))
+        self.debug_log_ctrl.Bind(wx.EVT_CHECKBOX, self.update_settings)
+        debug_log_row.Add(self.debug_log_ctrl, 1, wx.EXPAND)
+        gen_box.Add(debug_log_row, 0, wx.ALL | wx.EXPAND, 5)
+
         # Library name prefix
         prefix_row = wx.BoxSizer(wx.HORIZONTAL)
         self._lib_name_label = wx.StaticText(self, label="Library name prefix:")
@@ -148,18 +801,19 @@ class SettingsDialog(wx.Dialog):
         gen_box.Add(lib_path_row, 0, wx.ALL | wx.EXPAND, 5)
 
         maintenance_row = wx.BoxSizer(wx.HORIZONTAL)
-        self._cleanup_tables_btn = wx.Button(self, wx.ID_ANY, "Clear invalid paths in tables")
-        self._cleanup_tables_btn.SetToolTip(wx.ToolTip(
-            "Remove missing-library entries from sym-lib-table and fp-lib-table."
-        ))
-        self._cleanup_tables_btn.Bind(wx.EVT_BUTTON, self._on_cleanup_invalid_table_paths)
-        maintenance_row.Add(self._cleanup_tables_btn, 0, wx.TOP, 2)
+        self._mapping_index_btn = wx.Button(self, wx.ID_ANY, "Mapping & Indexing Settings")
+        self._mapping_index_btn.SetToolTip(
+            wx.ToolTip("Configure KiCad symbol/footprint mapping and index scan parameters.")
+        )
+        self._mapping_index_btn.Bind(wx.EVT_BUTTON, self._on_open_mapping_index_settings)
+        maintenance_row.Add(self._mapping_index_btn, 0, wx.TOP | wx.LEFT, 2)
         gen_box.Add(maintenance_row, 0, wx.ALL | wx.EXPAND, 5)
 
         layout.Add(gen_box, 0, wx.ALL | wx.EXPAND, 5)
         self.SetSizer(layout)
         self.Layout()
         self.Centre(wx.BOTH)
+        apply_button_label_tooltips(self, overwrite=True)
 
         self.load_settings()
 
@@ -167,6 +821,8 @@ class SettingsDialog(wx.Dialog):
         general = self.parent.settings.get("general", {})
         self.update_library_scope(general.get("library_scope", "project"))
         self.update_group_by_category(resolve_group_by_category(general, default=False))
+        self.update_hide_button_labels(self._as_bool(general.get("hide_button_labels"), default=False))
+        self.update_debug_log(self._as_bool(general.get("debug_log"), default=False))
         self.update_lib_prefix(
             resolve_library_base_name(general, project_path=Path(self.parent.project_path))
         )
@@ -348,6 +1004,18 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             pass
 
+    def update_hide_button_labels(self, value):
+        try:
+            self.hide_button_labels_ctrl.SetValue(self._as_bool(value, default=False))
+        except Exception:
+            pass
+
+    def update_debug_log(self, value):
+        try:
+            self.debug_log_ctrl.SetValue(self._as_bool(value, default=False))
+        except Exception:
+            pass
+
     def update_lib_format(self, value: str):
         if isinstance(value, str):
             key = value.strip().lower()
@@ -419,65 +1087,19 @@ class SettingsDialog(wx.Dialog):
             wx.OK | wx.ICON_INFORMATION,
         )
 
-    def _active_tables_root(self) -> Path:
-        general = (self.parent.settings.get("general", {}) or {})
-        scope = str(general.get("library_scope", "project")).strip().lower()
-        if scope == "shared":
-            lib_root, _uri_prefix = resolve_lib_root(general, Path(self.parent.project_path))
-            return lib_root
-        return Path(self.parent.project_path)
-
-    def _on_cleanup_invalid_table_paths(self, _evt):
+    def _on_open_mapping_index_settings(self, _evt):
+        dlg = None
         try:
-            roots = [self._active_tables_root()]
-            user_root = get_user_settings_path()
-            if user_root is not None and user_root not in roots:
-                roots.append(user_root)
-
-            existing_roots = [
-                r for r in roots if (r / "sym-lib-table").exists() or (r / "fp-lib-table").exists()
-            ]
-            if not existing_roots:
-                wx.MessageBox(
-                    "No library tables found in active project/shared scope or KiCad user settings.",
-                    "Cleanup Tables",
-                    wx.OK | wx.ICON_INFORMATION,
-                )
+            general = (self.parent.settings.get("general", {}) or {})
+            dlg = MappingIndexSettingsDialog(self.parent, general)
+            if dlg.ShowModal() != wx.ID_OK:
                 return
-
-            details = []
-            total_sym = 0
-            total_fp = 0
-            for root in existing_roots:
-                mgr = LibTablesManager(root, log=lambda _m: None)
-                removed_sym, removed_fp = mgr.prune_invalid_table_paths(
-                    project_path=Path(self.parent.project_path)
+            values = dlg.get_values()
+            for setting, value in values.items():
+                wx.PostEvent(
+                    self.parent,
+                    UpdateSetting(section="general", setting=setting, value=value),
                 )
-                total_sym += removed_sym
-                total_fp += removed_fp
-                if removed_sym or removed_fp:
-                    details.append(f"{root}\n  sym: {removed_sym}, fp: {removed_fp}")
-
-            total = total_sym + total_fp
-            if total == 0:
-                wx.MessageBox(
-                    "No invalid paths found in sym-lib-table / fp-lib-table.",
-                    "Cleanup Tables",
-                    wx.OK | wx.ICON_INFORMATION,
-                )
-                return
-            details_text = "\n\n".join(details) if details else "(details unavailable)"
-            wx.MessageBox(
-                "Removed invalid entries:\n"
-                f"- sym-lib-table: {total_sym}\n"
-                f"- fp-lib-table: {total_fp}\n\n"
-                f"Roots:\n{details_text}",
-                "Cleanup Tables",
-                wx.OK | wx.ICON_INFORMATION,
-            )
-        except Exception as exc:
-            wx.MessageBox(
-                f"Failed to clean library tables:\n{exc}",
-                "Cleanup Tables",
-                wx.OK | wx.ICON_ERROR,
-            )
+        finally:
+            if dlg is not None:
+                dlg.Destroy()

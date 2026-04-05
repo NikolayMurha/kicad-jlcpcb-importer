@@ -9,7 +9,13 @@ import wx  # pylint: disable=import-error
 import wx.dataview  # pylint: disable=import-error
 
 from ..core.events import MessageEvent
-from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
+from ..core.helpers import (
+    HighResWxSize,
+    loadBitmapScaled,
+    GetScaleFactor,
+    PLUGIN_PATH,
+    apply_button_label_tooltips,
+)
 from ..core.lcsc_api import LCSC_API
 
 
@@ -75,6 +81,14 @@ class PartDetailsDialog(wx.Dialog):
             width=int(self.scale_factor * 300),
             align=wx.ALIGN_LEFT,
         )
+        self._copy_value_menu_id = wx.NewId()
+        self._copy_property_menu_id = wx.NewId()
+        self._copy_pair_menu_id = wx.NewId()
+        self.Bind(wx.EVT_MENU, self._on_copy_value_menu, id=self._copy_value_menu_id)
+        self.Bind(wx.EVT_MENU, self._on_copy_property_menu, id=self._copy_property_menu_id)
+        self.Bind(wx.EVT_MENU, self._on_copy_pair_menu, id=self._copy_pair_menu_id)
+        self.data_list.Bind(wx.dataview.EVT_DATAVIEW_ITEM_CONTEXT_MENU, self._on_data_list_context_menu)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
         # ---------------------------------------------------------------------
         # ------------------------- Right side ------------------------------
@@ -164,6 +178,7 @@ class PartDetailsDialog(wx.Dialog):
         # Respect DPI
         self.SetSize(HighResWxSize(self.window, wx.Size(1000, 800)))
         self.Centre(wx.BOTH)
+        apply_button_label_tooltips(self, overwrite=True)
 
         self.get_part_data()
 
@@ -176,7 +191,7 @@ class PartDetailsDialog(wx.Dialog):
 
     def savepdf(self, *_):
         """Download a datasheet from The LCSC API."""
-        if self.pdfurl is not None:
+        if self.pdfurl:
             filename = self.pdfurl.rsplit("/", maxsplit=1)[1]
             self.logger.info("Save datasheet %s to %s", filename, self.datasheet_path)
             self.datasheet_path.mkdir(parents=True, exist_ok=True)
@@ -202,12 +217,104 @@ class PartDetailsDialog(wx.Dialog):
     def openpdf(self, *_):
         """Open the linked datasheet PDF on button click."""
         self.logger.info("opening %s", str(self.pdfurl))
-        webbrowser.open(str(self.pdfurl))
+        if self.pdfurl:
+            webbrowser.open(str(self.pdfurl))
 
     def openpage(self, *_):
         """Open the linked LCSC page for the part on button click."""
         self.logger.info("opening LCSC page for %s", str(self.part))
-        webbrowser.open(str(self.pageurl))
+        url = str(self.pageurl or self.lcsc_api.build_lcsc_search_url(str(self.part or "")))
+        if url:
+            webbrowser.open(url)
+
+    def _on_char_hook(self, event):
+        """Handle Cmd/Ctrl+C for copying selected field value."""
+        key = int(event.GetKeyCode())
+        if event.CmdDown() and not event.AltDown() and key in (ord("C"), ord("c")):
+            if self._copy_selected_value():
+                return
+        event.Skip()
+
+    def _selected_row(self) -> int:
+        try:
+            row = int(self.data_list.GetSelectedRow())
+            if row >= 0:
+                return row
+        except Exception:
+            pass
+        try:
+            item = self.data_list.GetSelection()
+            if item and item.IsOk():
+                row = int(self.data_list.ItemToRow(item))
+                if row >= 0:
+                    return row
+        except Exception:
+            pass
+        return -1
+
+    def _selected_field_pair(self) -> tuple[str, str]:
+        row = self._selected_row()
+        if row < 0:
+            return "", ""
+        try:
+            prop = str(self.data_list.GetValue(row, 0) or "")
+            value = str(self.data_list.GetValue(row, 1) or "")
+            return prop, value
+        except Exception:
+            return "", ""
+
+    @staticmethod
+    def _copy_text(text: str) -> bool:
+        content = str(text or "")
+        if not content:
+            return False
+        if not wx.TheClipboard.Open():
+            return False
+        try:
+            wx.TheClipboard.SetData(wx.TextDataObject(content))
+            wx.TheClipboard.Flush()
+            return True
+        finally:
+            wx.TheClipboard.Close()
+
+    def _copy_selected_value(self) -> bool:
+        _prop, value = self._selected_field_pair()
+        return self._copy_text(value)
+
+    def _copy_selected_property(self) -> bool:
+        prop, _value = self._selected_field_pair()
+        return self._copy_text(prop)
+
+    def _copy_selected_pair(self) -> bool:
+        prop, value = self._selected_field_pair()
+        if not prop and not value:
+            return False
+        if prop and value:
+            return self._copy_text(f"{prop}: {value}")
+        return self._copy_text(prop or value)
+
+    def _on_copy_value_menu(self, _evt):
+        self._copy_selected_value()
+
+    def _on_copy_property_menu(self, _evt):
+        self._copy_selected_property()
+
+    def _on_copy_pair_menu(self, _evt):
+        self._copy_selected_pair()
+
+    def _on_data_list_context_menu(self, _evt):
+        prop, value = self._selected_field_pair()
+        if not prop and not value:
+            return
+        menu = wx.Menu()
+        item_value = menu.Append(self._copy_value_menu_id, "Copy value\tCtrl+C")
+        item_prop = menu.Append(self._copy_property_menu_id, "Copy property")
+        item_pair = menu.Append(self._copy_pair_menu_id, 'Copy "property: value"')
+        item_value.Enable(bool(value))
+        item_prop.Enable(bool(prop))
+        item_pair.Enable(bool(prop or value))
+        self.PopupMenu(menu)
+        menu.Destroy()
 
     def get_scaled_bitmap(self, url, width, height):
         """Download a picture from a URL and convert it into a wx Bitmap.
@@ -314,8 +421,8 @@ class PartDetailsDialog(wx.Dialog):
                 )
             )
 
-        self.pdfurl = data.get("dataManualUrl")
-        self.pageurl = data.get("lcscGoodsUrl")
+        self.pdfurl = self.lcsc_api.resolve_datasheet_url(data)
+        self.pageurl = self.lcsc_api.resolve_part_page_url(data, lcsc_number=str(self.part))
 
     def report_part_data_fetch_error(self, reason):
         """Spawn a message box with an erro message if the fetch fails."""

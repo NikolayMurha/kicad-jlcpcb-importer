@@ -2,73 +2,18 @@ import copy
 import os
 import json
 import traceback
+import requests
 import concurrent.futures
 import zipfile
+import urllib
 
 from logging import info, warning, debug, error, critical
-from typing import Callable, Optional
+from typing import Callable
 
-from pcbnew import *  # type: ignore
-
-from . import decryptor
-from ...core.lcsc_api import LCSC_API
-from ...core.helpers import strip_lcsc_suffix
-
-_REQUESTS_IMPORT_ERROR = None
-_REQUESTS = None
-
-def _load_requests():
-    global _REQUESTS, _REQUESTS_IMPORT_ERROR
-    if _REQUESTS is not None:
-        return _REQUESTS
-    try:
-        import requests as _requests
-        _REQUESTS = _requests
-        _REQUESTS_IMPORT_ERROR = None
-        return _REQUESTS
-    except Exception as exc:
-        _REQUESTS_IMPORT_ERROR = exc
-        return None
-
-def _require_requests():
-    req = _load_requests()
-    if req is None:
-        msg = "Please install requests using: pip install requests --target ./lib"
-        raise Exception(msg) from _REQUESTS_IMPORT_ERROR
-    return req
-
-MODELS_DIR = "3dmodels"
+from pcbnew import *
 
 
-def _patch_esym_visibility(data_str: str) -> str:
-    """Make the 'Symbol' (Value) ATTR visible in an .esym JSONL file.
-
-    EasyEDA Pro symbols store per-attribute visibility as a boolean at index 5:
-        ["ATTR", id, parent, name, value, visible, editable, ...]
-    Many downloaded symbols arrive with ``visible=false`` for the "Symbol"
-    attribute, which maps to KiCad's Value and makes it hidden in the schematic.
-    """
-    lines = data_str.split("\n")
-    result = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and '"ATTR"' in stripped and '"Symbol"' in stripped:
-            try:
-                record = json.loads(stripped)
-                if (
-                    isinstance(record, list)
-                    and len(record) >= 6
-                    and record[0] == "ATTR"
-                    and record[3] == "Symbol"
-                    and record[5] is False
-                ):
-                    record[5] = True
-                    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-            except Exception:
-                pass
-        result.append(line)
-    return "\n".join(result)
-
+MODELS_DIR = "EASYEDA_MODELS"
 
 # UUID strings can be in the format <uuid>|<owner_uuid>. This function gets the <uuid> part
 def getUuidFirstPart(uuid):
@@ -76,14 +21,11 @@ def getUuidFirstPart(uuid):
         return None
     return uuid.split("|")[0]
 
-
 # Extract dataStr from component data. If dataStr is not available, try to decrypt and decompress the data from dataStrId URL.
-def extractDataStr(component_data, debug_log: bool = False):
+def extractDataStr(component_data):
     if not component_data:
         return None
-
-    req = _require_requests()
-
+        
     # Try direct dataStr first
     dataStr = component_data.get("dataStr")
     if dataStr:
@@ -96,20 +38,18 @@ def extractDataStr(component_data, debug_log: bool = False):
             keyHex = component_data.get("key")
             ivHex = component_data.get("iv")
 
-            if debug_log:
-                debug("dataStrId key: " + keyHex)
-                debug("dataStrId iv: " + ivHex)
+            debug("dataStrId key: " + keyHex)
+            debug("dataStrId iv: " + ivHex)
             
-            dataStrResp = req.get(dataStrId)
+            dataStrResp = requests.get(dataStrId)
             dataStrResp.raise_for_status()
 
-            if debug_log:
-                debug("dataStrId encrypted content: " + dataStrResp.content.hex())
-
+            debug("dataStrId encrypted content: " + dataStrResp.content.hex())
+            
+            from . import decryptor
             decryptedStr = decryptor.decryptDataStrIdData(dataStrResp.content, keyHex, ivHex)
 
-            if debug_log:
-                debug("dataStrId decrypted content: " + decryptedStr)
+            debug("dataStrId decrypted content: " + decryptedStr)
 
             return decryptedStr
         except Exception as e:
@@ -118,42 +58,18 @@ def extractDataStr(component_data, debug_log: bool = False):
     return None
 
 class ComponentLoader():
-    def __init__(
-        self,
-        kiprjmod,
-        target_path,
-        target_name,
-        progress: Callable[[int, int], None],
-        models_dir: Optional[str] = None,
-        debug_log: bool = False,
-    ):
+    def __init__(self, kiprjmod, target_path, target_name, progress: Callable[[int, int], None]):
         self.kiprjmod = kiprjmod
         self.target_path = target_path
         self.target_name = target_name
         self.progress = progress
-        self.lcsc_api = LCSC_API()
-        if models_dir:
-            self.models_dir = models_dir
-        else:
-            self.models_dir = os.path.join(self.kiprjmod, MODELS_DIR)
-        self.debug_log = bool(debug_log)
 
-    def _debug_json(self, label: str, value) -> None:
-        """Emit JSON payloads only when debug_log is enabled."""
-        if not self.debug_log:
-            return
-        try:
-            debug(f"{label}: {json.dumps(value, indent=4, ensure_ascii=False)}")
-        except Exception:
-            pass
-
-    def downloadAll(self, components, skip_models: bool = False):
+    def downloadAll(self, components):
         self.progress(0, 100)
 
         try:
             libDeviceFile, fetched_3dmodels = self.downloadSymFp(components)
-            if not skip_models:
-                self.downloadModels(libDeviceFile, fetched_3dmodels)
+            self.downloadModels(libDeviceFile, fetched_3dmodels)
             self.progress(100, 100)
         except Exception as e:
             traceback.print_exc()
@@ -176,9 +92,11 @@ class ComponentLoader():
 
         # Fetch UUIDs from code-based components
         if code_components:
-            found = self.lcsc_api.easyeda_search_by_codes(code_components)
+            resp = requests.post("https://pro.easyeda.com/api/v2/devices/searchByCodes", data={"codes[]": code_components})
+            resp.raise_for_status()
+            found = resp.json()
 
-            self._debug_json("searchByCodes", found)
+            debug("searchByCodes: " + json.dumps(found, indent=4))
 
             if not found.get("success") or not found.get("result"):
                 raise Exception(f"Unable to fetch device info: {found}")
@@ -189,20 +107,17 @@ class ComponentLoader():
 
         # Fetch device info by UUID
         def fetch_device_info(dev_uuid):
-            dev_info = self.lcsc_api.easyeda_get_device(dev_uuid)
-            self._debug_json("device info", dev_info)
-            result = dev_info.get("result")
-            if not result:
-                raise Exception(f"Empty result for device UUID {dev_uuid}: {dev_info}")
-            fetched_devices[result["uuid"]] = result
+            dev_info = requests.get(f"https://pro.easyeda.com/api/devices/{dev_uuid}")
+            dev_info.raise_for_status()
+
+            debug("device info: " + json.dumps(dev_info.json(), indent=4))
+
+            device = dev_info.json()["result"]
+            fetched_devices[device["uuid"]] = device
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(fetch_device_info, dev_uuid) for dev_uuid in direct_uuids]
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    error(f"Failed to fetch device info: {e}")
+            for dev_uuid in direct_uuids:
+                executor.submit(fetch_device_info, dev_uuid)
 
         # Collect symbol/footprint/3D model UUIDs to fetch
         fetched_symbols = {}
@@ -226,15 +141,17 @@ class ComponentLoader():
 
         # Fetch symbols/footprints/3D models
         def fetch_component(uuid):
-            comp_info = self.lcsc_api.easyeda_get_component(uuid)
-            return comp_info["result"]
+            url = f"https://pro.easyeda.com/api/v2/components/{uuid}"
+            r = requests.get(url)
+            r.raise_for_status()
+            return r.json()["result"]
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = {executor.submit(fetch_component, uuid): uuid for uuid in all_uuids}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     compData = future.result()
-                    self._debug_json("Fetched component", compData)
+                    debug(f"Fetched component {json.dumps(compData, indent=4)}")
 
                     uuid_to_obj_map[compData["uuid"]][compData["uuid"]] = compData
                 except Exception as e:
@@ -242,13 +159,11 @@ class ComponentLoader():
 
         # Set symbol/footprint type fields
         for device in fetched_devices.values():
-            sym_uuid = device['attributes'].get('Symbol')
-            if sym_uuid and sym_uuid in fetched_symbols:
-                fetched_symbols[sym_uuid]["type"] = device.get("symbol_type", "")
+            if device['attributes'].get('Symbol'):
+                fetched_symbols[device["attributes"]["Symbol"]]["type"] = device["symbol_type"]
 
-            fp_uuid = device['attributes'].get('Footprint')
-            if fp_uuid and fp_uuid in fetched_footprints:
-                fetched_footprints[fp_uuid]["type"] = device.get("footprint_type", "")
+            if device['attributes'].get('Footprint'):
+                fetched_footprints[device["attributes"]["Footprint"]]["type"] = device["footprint_type"]
 
         # Extract dataStr
         footprint_data_str = {}
@@ -256,80 +171,19 @@ class ComponentLoader():
 
         # Separate dataStr for footprints
         for f_uuid, f_data in fetched_footprints.items():
-            ds = extractDataStr(f_data, debug_log=self.debug_log)
+            ds = extractDataStr(f_data)
             if ds:
                 footprint_data_str[f_uuid] = ds
 
             f_data.pop("dataStr", None) # Remove the dataStr field if exists
 
-        # Build sym_uuid -> device name mapping for name patching
-        sym_uuid_to_name = {}
-        for device in fetched_devices.values():
-            sym_uuid = device.get("attributes", {}).get("Symbol")
-            if not sym_uuid:
-                continue
-            name = (
-                device.get("display_title")
-                or device.get("title")
-                or device.get("name")
-                or device.get("product_code")
-                or ""
-            ).strip()
-            name = strip_lcsc_suffix(name)
-            if name:
-                sym_uuid_to_name[sym_uuid] = name
-
         # Separate dataStr for symbols
         for s_uuid, s_data in fetched_symbols.items():
-            ds = extractDataStr(s_data, debug_log=self.debug_log)
+            ds = extractDataStr(s_data)
             if ds:
-                # Patch Symbol ATTR name (strip LCSC suffix) and visibility.
-                # .esym uses JSONL format (one JSON array per line), so we
-                # patch it line-by-line rather than with json.loads on the whole string.
-                dev_name = sym_uuid_to_name.get(s_uuid, "")
-                patched_lines = []
-                for line in ds.split("\n"):
-                    stripped = line.strip()
-                    if (stripped
-                            and '"ATTR"' in stripped
-                            and '"Symbol"' in stripped):
-                        try:
-                            record = json.loads(stripped)
-                            if (
-                                isinstance(record, list)
-                                and len(record) >= 6
-                                and record[0] == "ATTR"
-                                and record[3] == "Symbol"
-                            ):
-                                # Strip LCSC suffix from value (index 4)
-                                val = str(record[4] or "").strip()
-                                clean = strip_lcsc_suffix(val)
-                                if clean and clean != val:
-                                    record[4] = clean
-                                elif dev_name and (not val or val == "~"):
-                                    record[4] = dev_name
-                                # Ensure visible (index 5)
-                                record[5] = True
-                                line = json.dumps(
-                                    record,
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                        except Exception:
-                            pass
-                    patched_lines.append(line)
-                ds = "\n".join(patched_lines)
                 symbol_data_str[s_uuid] = ds
 
             s_data.pop("dataStr", None) # Remove the dataStr field if exists
-
-        # Normalize human-facing names in device entries so elibz symbols/lists
-        # do not include trailing _Cxxxxxx suffixes.
-        for device in fetched_devices.values():
-            for key in ("display_title", "title", "name"):
-                raw = str(device.get(key) or "").strip()
-                if raw:
-                    device[key] = strip_lcsc_suffix(raw)
 
         libDeviceFile = {
             "devices": fetched_devices,
@@ -339,7 +193,7 @@ class ComponentLoader():
 
         os.makedirs(self.target_path, exist_ok=True)
 
-        zip_filename = os.path.join(self.target_path, f"{self.target_name}.elibz")
+        zip_filename = f"{self.target_path}/{self.target_name}.elibz"
         merged_data = copy.deepcopy(libDeviceFile)
 
         try:
@@ -355,9 +209,7 @@ class ComponentLoader():
                         if name.endswith('.esym'):
                             symbol_uuid = os.path.splitext(os.path.basename(name))[0]
                             if symbol_uuid not in symbol_data_str:
-                                symbol_data_str[symbol_uuid] = _patch_esym_visibility(
-                                    old_zip.read(name).decode("utf-8")
-                                )
+                                symbol_data_str[symbol_uuid] = old_zip.read(name).decode('utf-8')
                         elif name.endswith('.efoo'):
                             footprint_uuid = os.path.splitext(os.path.basename(name))[0]
                             if footprint_uuid not in footprint_data_str:
@@ -390,8 +242,8 @@ class ComponentLoader():
         uuidToTargetFileMap = {}
         uuidsToTransform = {}
 
-        self._debug_json("fetched_3dmodels", fetched_3dmodels)
-        self._debug_json("libDeviceFile", libDeviceFile)
+        debug("fetched_3dmodels: " + json.dumps(fetched_3dmodels, indent=4))
+        debug("libDeviceFile: " + json.dumps(libDeviceFile, indent=4))
 
         for device in libDeviceFile["devices"].values():
             try:
@@ -406,7 +258,7 @@ class ComponentLoader():
                 modelTitle = device["attributes"]["3D Model Title"]
                 modelTransform = device["attributes"].get("3D Model Transform", "")
 
-                dataStr = extractDataStr(fetched_3dmodels[modelUuid], debug_log=self.debug_log)
+                dataStr = extractDataStr(fetched_3dmodels[modelUuid])
 
                 if dataStr:
                     directUuid = json.loads(dataStr)["model"]
@@ -416,14 +268,9 @@ class ComponentLoader():
                             device.get("footprint").get("display_title") if device.get("footprint") else "None"))
                     continue
 
-                parts = [x.strip() for x in modelTransform.split(",") if x.strip()]
-                if len(parts) < 2:
-                    info(f"Skipping 3D transform for '{modelTitle}': not enough values in '{modelTransform}'")
-                    continue
-                uuidsToTransform[directUuid] = [float(x) for x in parts]
+                uuidsToTransform[directUuid] = [float(x) for x in modelTransform.split(",")]
 
-                os.makedirs(self.models_dir, exist_ok=True)
-                easyEdaFilename = os.path.join(self.models_dir, modelTitle + ".step")
+                easyEdaFilename = os.path.join(self.kiprjmod, MODELS_DIR, modelTitle + ".step")
                 easyEdaFilename = os.path.normpath(easyEdaFilename)
 
                 uuidToTargetFileMap[directUuid] = easyEdaFilename
@@ -503,15 +350,14 @@ class ComponentLoader():
 
                     try:
                         if not os.path.exists(kfilePath):
+                            stepUrlFormat = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/{uuid}"
                             jfilePath = kfilePath + "_jlc"
-                            url = self.lcsc_api.build_easyeda_step_url(directUuid)
-                            if not url:
-                                raise ValueError("Empty EasyEDA STEP model URL")
+                            url = stepUrlFormat.format(uuid=directUuid)
 
                             debug("Downloading '%s'" % (file_name))
                             debug("'%s' from '%s'" % (file_name, url))
                             os.makedirs(os.path.dirname(kfilePath), exist_ok=True)
-                            self.lcsc_api.download_easyeda_step_model(directUuid, jfilePath)
+                            urllib.request.urlretrieve(url, jfilePath)
 
                             if os.path.isfile(jfilePath):
                                 debug("Downloaded '%s'." % (file_name))

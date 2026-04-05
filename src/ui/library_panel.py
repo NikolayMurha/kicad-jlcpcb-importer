@@ -8,54 +8,32 @@ Destination is always KiCad format:
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
-import tempfile
 import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import wx
 
-from ..core.elibz_native import (
-    convert_elibz_with_kicad_cli,
-    find_device_by_name,
-    load_elibz_payload,
-    pick_symbol_name_from_converted,
-    rename_symbol_block,
-    resolve_footprint_mod_path as resolve_elibz_footprint_mod_path,
-)
-from ..core.helpers import HighResWxSize, sanitize_lib_name, strip_lcsc_suffix
+from ..core.helpers import HighResWxSize, sanitize_lib_name, apply_button_label_tooltips
 from ..core.lib_paths import (
     resolve_group_by_category,
     resolve_lib_root,
     resolve_library_base_name,
     resolve_target_library_name,
 )
-from ..core.lib_tables import LibTablesManager
-from ..core.shared_lib import (
-    ensure_project_legacy_models_link,
-    ensure_project_table_links,
-    ensure_shared_meta,
-)
 from ..core.sym_lib_reader import (
-    add_or_replace_symbol,
-    copy_footprint_to_pretty,
-    extract_symbol_block,
     get_connected_elibz_libs,
     get_connected_fp_libs,
     get_connected_sym_libs,
-    get_footprint_property,
     list_symbols_elibz_meta,
     list_symbols_kicad_meta,
-    patch_footprint_property,
 )
+from ..core.library_vendor import LibraryVendorService
 
 _OK_COLOUR = wx.Colour(0, 128, 0)
 _ERR_COLOUR = wx.Colour(180, 0, 0)
 _DIM_COLOUR = wx.Colour(100, 100, 100)
-_BUILTIN_3D_PREFIXES = ("${KICAD", "$ENV{KICAD", "$(KICAD")
 
 
 class LibraryManagerDialog(wx.Dialog):
@@ -63,14 +41,24 @@ class LibraryManagerDialog(wx.Dialog):
 
     _ALL_LABEL = "— All libraries —"
 
-    def __init__(self, parent):
+    def __init__(self, parent, picker_mode: bool = False, picker_kind: str = "symbol"):
+        picker_mode_flag = bool(picker_mode)
+        picker_kind_key = str(picker_kind or "symbol").strip().lower()
+        title = (
+            "Select Footprints from Libraries"
+            if picker_mode_flag and picker_kind_key == "footprint"
+            else ("Select Symbols from Libraries" if picker_mode_flag else "Import from other libraries")
+        )
         super().__init__(
             parent,
-            title="Import from other libraries",
+            title=title,
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
             size=HighResWxSize(parent.window, wx.Size(940, 560)),
         )
         self.parent = parent
+        self._picker_mode = picker_mode_flag
+        self._picker_kind = picker_kind_key
+        self._picked_items: List[Tuple[str, str, Path, str, str, str]] = []
 
         self._sym_libs: List[Tuple[str, Path]] = []
         self._fp_libs: List[Tuple[str, Path]] = []
@@ -81,6 +69,13 @@ class LibraryManagerDialog(wx.Dialog):
         self._import_running = False
 
         self._build_ui()
+        if self._picker_mode:
+            if self._picker_kind == "footprint":
+                self._mode_choice.SetSelection(1)
+            else:
+                self._mode_choice.SetSelection(0)
+            self._mode_choice.Enable(False)
+        apply_button_label_tooltips(self, overwrite=True)
         self._refresh_connected_libs()
 
     def _build_ui(self):
@@ -116,6 +111,7 @@ class LibraryManagerDialog(wx.Dialog):
         left_btns = wx.BoxSizer(wx.HORIZONTAL)
         browse_btn = wx.Button(self, wx.ID_ANY, "Browse…", style=wx.BU_EXACTFIT)
         browse_btn.Bind(wx.EVT_BUTTON, self._on_browse)
+        self._browse_btn = browse_btn
         left_btns.Add(browse_btn, 0, wx.RIGHT, 6)
         refresh_btn = wx.Button(self, wx.ID_ANY, "Refresh", style=wx.BU_EXACTFIT)
         refresh_btn.Bind(wx.EVT_BUTTON, lambda _: self._refresh_connected_libs())
@@ -154,7 +150,11 @@ class LibraryManagerDialog(wx.Dialog):
         self._status_label = wx.StaticText(self, label="")
         self._status_label.SetForegroundColour(_DIM_COLOUR)
         bottom.Add(self._status_label, 1, wx.ALIGN_CENTER_VERTICAL)
-        self._import_btn = wx.Button(self, wx.ID_ANY, "Import selected")
+        self._import_btn = wx.Button(
+            self,
+            wx.ID_ANY,
+            "Use selected" if self._picker_mode else "Import selected",
+        )
         self._import_btn.Enable(False)
         self._import_btn.Bind(wx.EVT_BUTTON, self._on_import_btn)
         bottom.Add(self._import_btn, 0, wx.LEFT, 8)
@@ -209,20 +209,6 @@ class LibraryManagerDialog(wx.Dialog):
         dest = self._get_dest_lib_path(category_hint)
         return dest.parent / f"{dest.stem}.pretty"
 
-    def _get_models_dir(self) -> Path:
-        lib_dir, _uri_prefix = resolve_lib_root(
-            self._general_settings(),
-            Path(self.parent.project_path),
-        )
-        return lib_dir / "3dmodels"
-
-    def _uri_prefix(self) -> str:
-        _lib_dir, uri_prefix = resolve_lib_root(
-            self._general_settings(),
-            Path(self.parent.project_path),
-        )
-        return uri_prefix
-
     def _category_hint_from_source(self, src_path: Path) -> str:
         raw = sanitize_lib_name(src_path.stem or "Misc")
         general = self._general_settings()
@@ -249,18 +235,44 @@ class LibraryManagerDialog(wx.Dialog):
         except Exception:
             project_path = None
 
-        kicad_libs = list(get_connected_sym_libs(project_path))
-        elibz_libs = get_connected_elibz_libs(project_path)
-        self._sym_libs = [
-            (name, lib_path)
-            for name, lib_path in (kicad_libs + elibz_libs)
-            if not self._is_current_library_path(lib_path)
-        ]
-        self._fp_libs = [
-            (name, lib_path)
-            for name, lib_path in get_connected_fp_libs(project_path)
-            if not self._is_current_library_path(lib_path)
-        ]
+        if self._picker_mode:
+            # Mapping picker must expose only stable KiCad nicknames that can be
+            # resolved by builtin mapping logic; skip project tables and custom browse sources.
+            self._sym_libs = [
+                (name, lib_path)
+                for name, lib_path in get_connected_sym_libs(
+                    project_path,
+                    include_project_tables=False,
+                    include_user_tables=False,
+                )
+                if not self._is_current_library_path(lib_path)
+            ]
+            self._fp_libs = [
+                (name, lib_path)
+                for name, lib_path in get_connected_fp_libs(
+                    project_path,
+                    include_project_tables=False,
+                    include_user_tables=False,
+                )
+                if not self._is_current_library_path(lib_path)
+            ]
+            try:
+                self._browse_btn.Enable(False)
+            except Exception:
+                pass
+        else:
+            kicad_libs = list(get_connected_sym_libs(project_path, include_user_tables=False))
+            elibz_libs = get_connected_elibz_libs(project_path, include_user_tables=False)
+            self._sym_libs = [
+                (name, lib_path)
+                for name, lib_path in (kicad_libs + elibz_libs)
+                if not self._is_current_library_path(lib_path)
+            ]
+            self._fp_libs = [
+                (name, lib_path)
+                for name, lib_path in get_connected_fp_libs(project_path, include_user_tables=False)
+                if not self._is_current_library_path(lib_path)
+            ]
         self._rebuild_source_choice()
 
     def _is_footprint_mode(self) -> bool:
@@ -499,6 +511,8 @@ class LibraryManagerDialog(wx.Dialog):
             self._load_library(lib_path, lib_name)
 
     def _on_browse(self, _evt):
+        if self._picker_mode:
+            return
         if self._is_footprint_mode():
             dlg = wx.DirDialog(
                 self,
@@ -584,11 +598,23 @@ class LibraryManagerDialog(wx.Dialog):
         except Exception:
             self._import_btn.Enable(False)
 
+    def _build_vendor_service(self) -> LibraryVendorService:
+        return LibraryVendorService(
+            project_path=Path(self.parent.project_path),
+            general_settings=self._general_settings(),
+            fp_libs=self._fp_libs,
+        )
+
     def _do_import_selected(self):
         selected_items = self._selected_filtered_items()
         if not selected_items:
             return
+        if self._picker_mode:
+            self._picked_items = list(selected_items)
+            self.EndModal(wx.ID_OK)
+            return
         is_footprint_mode = self._is_footprint_mode()
+        vendor = self._build_vendor_service()
         item_label = "footprint" if is_footprint_mode else "symbol"
         self._import_running = True
         self._sync_import_button_state()
@@ -602,265 +628,15 @@ class LibraryManagerDialog(wx.Dialog):
             results: List[Tuple[str, bool, str]] = []
             for idx, (item_name, _desc, src_path, src_alias, _fp_label, _has3d) in enumerate(selected_items, start=1):
                 wx.CallAfter(self._set_status, f"Importing {item_label} {item_name}… ({idx}/{total})", True)
+                category_hint = self._category_hint_from_source(src_path)
                 if is_footprint_mode:
-                    ok, msg = self._import_footprint(item_name, src_path, src_alias)
+                    ok, msg = vendor.import_footprint(item_name, src_path, src_alias, category_hint)
                 else:
-                    ok, msg = self._import_symbol(item_name, src_path)
+                    ok, msg = vendor.import_symbol(item_name, src_path, category_hint)
                 results.append((item_name, ok, msg))
             wx.CallAfter(self._on_import_batch_done, results)
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _import_symbol(self, symbol_name: str, src_path: Path) -> Tuple[bool, str]:
-        category_hint = self._category_hint_from_source(src_path)
-        dest = self._get_dest_lib_path(category_hint)
-        try:
-            if src_path.suffix.lower() == ".elibz":
-                return self._import_from_elibz(symbol_name, src_path, dest, category_hint)
-            return self._import_from_kicad_sym(symbol_name, src_path, dest, category_hint)
-        except Exception as exc:
-            return False, f"Import failed: {exc}"
-
-    def _import_footprint(self, fp_name: str, src_pretty: Path, src_alias: str) -> Tuple[bool, str]:
-        category_hint = self._category_hint_from_source(src_pretty)
-        dest_pretty = self._get_dest_pretty_path(category_hint)
-        dest_sym = self._get_dest_lib_path(category_hint)
-        src_mod = src_pretty / f"{fp_name}.kicad_mod"
-        if not src_mod.exists():
-            return False, f"Footprint '{fp_name}' not found in source"
-
-        try:
-            dest_pretty.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_mod, dest_pretty / src_mod.name)
-            model_copied = self._copy_kicad_3d_model(
-                f"{src_alias}:{fp_name}",
-                dest_pretty,
-                [(src_alias, src_pretty)],
-                source_root=src_pretty.parent,
-            )
-            self._update_lib_tables(dest_sym)
-            parts = [f"footprint '{fp_name}' vendored"]
-            if model_copied:
-                parts.append("3D model copied")
-            return True, " — ".join(parts)
-        except Exception as exc:
-            return False, f"Footprint import failed: {exc}"
-
-    def _import_from_elibz(
-        self,
-        symbol_name: str,
-        src_path: Path,
-        dest: Path,
-        category_hint: str,
-    ) -> Tuple[bool, str]:
-        try:
-            payload = load_elibz_payload(src_path)
-            device_entry = find_device_by_name(payload, symbol_name)
-            if device_entry is None:
-                return False, f"Device '{symbol_name}' not found in source"
-            attrs = device_entry.get("attributes", {}) or {}
-        except Exception as exc:
-            return False, f"Unable to read source .elibz: {exc}"
-
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest_pretty = self._get_dest_pretty_path(category_hint)
-            dest_pretty.mkdir(parents=True, exist_ok=True)
-            dest_models = self._get_models_dir()
-            dest_models.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="elibz_convert_") as td:
-                tmp_dir = Path(td)
-                converted_sym = tmp_dir / "converted.kicad_sym"
-                converted_pretty = tmp_dir / "converted.pretty"
-                convert_elibz_with_kicad_cli(src_path, converted_sym, converted_pretty)
-
-                clean_symbol_name = strip_lcsc_suffix(symbol_name)
-                source_symbol_name = pick_symbol_name_from_converted(
-                    converted_sym,
-                    device_entry,
-                    requested_name=clean_symbol_name,
-                )
-                if not source_symbol_name:
-                    return False, "Unable to locate symbol in converted ELIBZ output"
-
-                block = extract_symbol_block(converted_sym, source_symbol_name)
-                if block is None:
-                    return False, f"Symbol '{source_symbol_name}' not found in converted ELIBZ output"
-
-                if source_symbol_name != clean_symbol_name:
-                    block = rename_symbol_block(block, source_symbol_name, clean_symbol_name)
-
-                block = patch_footprint_property(block, dest.stem)
-                add_or_replace_symbol(dest, clean_symbol_name, block)
-
-                fp_candidates: List[str] = []
-                fp_ref = get_footprint_property(block) or ""
-                if ":" in fp_ref:
-                    fp_candidates.append(fp_ref.split(":", 1)[1])
-                for cand in (
-                    attrs.get("Footprint"),
-                    (device_entry.get("footprint", {}) or {}).get("display_title"),
-                    (device_entry.get("footprint", {}) or {}).get("title"),
-                ):
-                    text = str(cand or "").strip()
-                    if text and text not in fp_candidates:
-                        fp_candidates.append(text)
-
-                footprint_path = None
-                for fp_name in fp_candidates:
-                    src_mod = resolve_elibz_footprint_mod_path(converted_pretty, fp_name)
-                    if src_mod is None:
-                        continue
-                    footprint_path = dest_pretty / src_mod.name
-                    shutil.copy2(src_mod, footprint_path)
-                    break
-
-            model_copied = False
-
-            if not model_copied:
-                model_copied = self._copy_elibz_step_model(symbol_name, src_path)
-                if model_copied:
-                    try:
-                        if footprint_path is not None:
-                            content = footprint_path.read_text(encoding="utf-8", errors="replace")
-                            content = re.sub(r"\.wrl\"", '.step"', content)
-                            footprint_path.write_text(content, encoding="utf-8")
-                    except Exception:
-                        pass
-
-            self._update_lib_tables(dest)
-            parts = [f"'{symbol_name}' vendored", "symbol+footprint converted (native kicad-cli)"]
-            if model_copied:
-                parts.append("3D model copied")
-            return True, " — ".join(parts)
-        except Exception as exc:
-            return False, f"ELIBZ → KiCad conversion failed: {exc}"
-
-    def _copy_elibz_step_model(self, symbol_name: str, src_path: Path) -> bool:
-        try:
-            payload = load_elibz_payload(src_path)
-            dev = find_device_by_name(payload, symbol_name)
-            model_title = str(((dev or {}).get("attributes") or {}).get("3D Model Title") or "").strip()
-        except Exception:
-            return False
-
-        if not model_title:
-            return False
-
-        candidates = [
-            src_path.parent / "3dmodels" / f"{model_title}.step",
-            src_path.parent / "EASYEDA_MODELS" / f"{model_title}.step",
-            Path(self.parent.project_path) / "3dmodels" / f"{model_title}.step",
-            Path(self.parent.project_path) / "EASYEDA_MODELS" / f"{model_title}.step",
-        ]
-        src_step = next((p for p in candidates if p.exists()), None)
-        if src_step is None:
-            return False
-
-        dest_models = self._get_models_dir()
-        dest_models.mkdir(parents=True, exist_ok=True)
-        dest_step = dest_models / src_step.name
-        if not dest_step.exists():
-            shutil.copy2(src_step, dest_step)
-        return True
-
-    def _import_from_kicad_sym(
-        self,
-        symbol_name: str,
-        src_path: Path,
-        dest: Path,
-        category_hint: str,
-    ) -> Tuple[bool, str]:
-        block = extract_symbol_block(src_path, symbol_name)
-        if block is None:
-            return False, f"Symbol '{symbol_name}' not found in source"
-
-        fp_ref = get_footprint_property(block)
-        fp_copied = False
-        model_copied = False
-        src_fp_libs = self._source_fp_libs(src_path)
-
-        if fp_ref and ":" in fp_ref:
-            dest_pretty = self._get_dest_pretty_path(category_hint)
-            fp_copied = copy_footprint_to_pretty(fp_ref, dest_pretty, src_fp_libs)
-            if not fp_copied and src_path.suffix.lower() == ".kicad_sym":
-                fp_name = fp_ref.split(":", 1)[1]
-                fp_copied = self._copy_fp_from_sibling_pretty(src_path, fp_name, dest_pretty)
-            if fp_copied:
-                block = patch_footprint_property(block, dest.stem)
-                model_copied = self._copy_kicad_3d_model(
-                    fp_ref,
-                    dest_pretty,
-                    src_fp_libs,
-                    source_root=src_path.parent,
-                )
-
-        add_or_replace_symbol(dest, symbol_name, block)
-        self._update_lib_tables(dest)
-
-        parts = [f"'{symbol_name}' vendored"]
-        if fp_copied:
-            parts.append("footprint copied")
-        elif fp_ref and ":" in fp_ref:
-            parts.append(f"footprint '{fp_ref}' not found")
-        if model_copied:
-            parts.append("3D model copied")
-        return True, " — ".join(parts)
-
-    def _copy_kicad_3d_model(
-        self,
-        fp_ref: str,
-        dest_pretty: Path,
-        fp_libs: List[Tuple[str, Path]],
-        source_root: Optional[Path] = None,
-    ) -> bool:
-        if ":" not in fp_ref:
-            return False
-        lib_name, fp_name = fp_ref.split(":", 1)
-
-        kicad_mod = dest_pretty / f"{fp_name}.kicad_mod"
-        if not kicad_mod.exists():
-            return False
-
-        content = kicad_mod.read_text(encoding="utf-8", errors="replace")
-        model_paths = re.findall(r'\(model\s+"([^"]+)"', content)
-        if not model_paths:
-            return False
-
-        copied = False
-        new_content = content
-        dest_models_dir = self._get_models_dir()
-        models_base = self._model_uri_base().rstrip("/")
-
-        for model_path in model_paths:
-            if any(model_path.startswith(p) for p in _BUILTIN_3D_PREFIXES):
-                continue
-
-            src_model = self._resolve_model_path(
-                model_path,
-                lib_name,
-                fp_libs=fp_libs,
-                source_root=source_root,
-            )
-            if src_model is None or not src_model.exists():
-                legacy_ref = self._normalize_legacy_model_ref(model_path, models_base)
-                if legacy_ref and legacy_ref != model_path:
-                    new_content = new_content.replace(f'"{model_path}"', f'"{legacy_ref}"', 1)
-                    copied = True
-                continue
-
-            dest_models_dir.mkdir(parents=True, exist_ok=True)
-            dest_model = dest_models_dir / src_model.name
-            if not dest_model.exists():
-                shutil.copy2(src_model, dest_model)
-
-            new_ref = f"{models_base}/{dest_model.name}"
-            new_content = new_content.replace(f'"{model_path}"', f'"{new_ref}"', 1)
-            copied = True
-
-        if new_content != content:
-            kicad_mod.write_text(new_content, encoding="utf-8")
-        return copied
 
     def _resolve_footprint_mod_path(
         self,
@@ -891,73 +667,6 @@ class LibraryManagerDialog(wx.Dialog):
         self._fp_model_cache[key] = has_3d
         return has_3d
 
-    def _resolve_model_path(
-        self,
-        model_path: str,
-        lib_name: str,
-        fp_libs: List[Tuple[str, Path]],
-        source_root: Optional[Path] = None,
-    ) -> Optional[Path]:
-        src_pretty: Optional[Path] = None
-        for name, p in fp_libs:
-            if name == lib_name:
-                src_pretty = p
-                break
-
-        original = model_path
-        resolved = model_path
-        if "${KIPRJMOD}" in resolved:
-            if src_pretty is not None:
-                resolved = resolved.replace("${KIPRJMOD}", str(src_pretty.parent))
-            elif source_root is not None:
-                resolved = resolved.replace("${KIPRJMOD}", str(source_root))
-            else:
-                resolved = resolved.replace("${KIPRJMOD}", str(self.parent.project_path))
-
-        p = Path(resolved)
-        if p.is_absolute() and p.exists():
-            return p
-
-        if src_pretty is not None:
-            candidate = src_pretty.parent / resolved
-            if candidate.exists():
-                return candidate
-            candidate = src_pretty / resolved
-            if candidate.exists():
-                return candidate
-
-        if source_root is not None:
-            candidate = source_root / resolved
-            if candidate.exists():
-                return candidate
-
-        if "${KIPRJMOD}" in original:
-            alt = original.replace("${KIPRJMOD}", str(self.parent.project_path))
-            p2 = Path(alt)
-            if p2.is_absolute() and p2.exists():
-                return p2
-
-        if "EASYEDA_MODELS" in original:
-            alt2 = original.replace("EASYEDA_MODELS", "3dmodels")
-            if "${KIPRJMOD}" in alt2:
-                alt2 = alt2.replace("${KIPRJMOD}", str(self.parent.project_path))
-            p3 = Path(alt2)
-            if p3.is_absolute() and p3.exists():
-                return p3
-
-        return None
-
-    @staticmethod
-    def _normalize_legacy_model_ref(model_path: str, models_base: str) -> Optional[str]:
-        norm = model_path.replace("\\", "/")
-        marker = "/EASYEDA_MODELS/"
-        if marker not in norm:
-            return None
-        tail = norm.split(marker, 1)[1].lstrip("/")
-        if not tail:
-            return None
-        return f"{models_base}/{tail}"
-
     def _source_fp_libs(self, src_sym_path: Path) -> List[Tuple[str, Path]]:
         libs = list(self._fp_libs)
         if src_sym_path.suffix.lower() == ".kicad_sym":
@@ -967,64 +676,6 @@ class LibraryManagerDialog(wx.Dialog):
                 if not any(name == alias and p.resolve() == sibling.resolve() for name, p in libs):
                     libs.append((alias, sibling))
         return libs
-
-    @staticmethod
-    def _copy_fp_from_sibling_pretty(src_sym_path: Path, fp_name: str, dest_pretty: Path) -> bool:
-        try:
-            src = src_sym_path.with_suffix(".pretty") / f"{fp_name}.kicad_mod"
-            if not src.exists():
-                return False
-            dest_pretty.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest_pretty / f"{fp_name}.kicad_mod")
-            return True
-        except Exception:
-            return False
-
-    def _model_uri_base(self) -> str:
-        models_dir = self._get_models_dir().resolve()
-        try:
-            rel = os.path.relpath(models_dir, Path(self.parent.project_path).resolve())
-            return "${KIPRJMOD}/" + Path(rel).as_posix()
-        except Exception:
-            return "${KIPRJMOD}/3dmodels"
-
-    def _update_lib_tables(self, dest: Path) -> None:
-        try:
-            general = self._general_settings()
-            scope = str(general.get("library_scope", "project")).strip().lower()
-            if scope == "shared":
-                shared_root = dest.parent
-                default_name = resolve_library_base_name(
-                    general,
-                    project_path=Path(self.parent.project_path),
-                )
-                ensure_shared_meta(shared_root, default_name, log=lambda _: None)
-                _shared_root, shared_uri_prefix = resolve_lib_root(
-                    general,
-                    Path(self.parent.project_path),
-                )
-                LibTablesManager(shared_root, log=lambda _: None).ensure_project_lib_tables(
-                    shared_root,
-                    use_project_relative=False,
-                    uri_prefix=shared_uri_prefix,
-                )
-                ensure_project_table_links(
-                    Path(self.parent.project_path),
-                    shared_root,
-                    log=lambda _: None,
-                )
-            else:
-                LibTablesManager(Path(self.parent.project_path), log=lambda _: None).ensure_project_lib_tables(
-                    dest.parent,
-                    uri_prefix=self._uri_prefix(),
-                )
-            ensure_project_legacy_models_link(
-                Path(self.parent.project_path),
-                self._get_models_dir(),
-                log=lambda _: None,
-            )
-        except Exception:
-            pass
 
     def _on_import_batch_done(self, results: List[Tuple[str, bool, str]]):
         self._import_running = False
@@ -1063,3 +714,6 @@ class LibraryManagerDialog(wx.Dialog):
             self.Layout()
         except Exception:
             pass
+
+    def get_picked_items(self) -> List[Tuple[str, str, Path, str, str, str]]:
+        return list(self._picked_items)

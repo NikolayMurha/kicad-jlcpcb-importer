@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 import wx  # type: ignore
 from ...core.events import LogboxAppendEvent
 
@@ -37,7 +37,7 @@ class EasyedaProImporter:
         self.scope = str(scope).lower()
         self.lib_dir = Path(lib_dir) if lib_dir is not None else (Path(PLUGIN_PATH) / "lib")
 
-    def _compute_outputs(self, category: str) -> Tuple[Path, Path, Path, str, Path]:
+    def _compute_outputs(self) -> Tuple[Path, Path, Path, str, Path]:
 
         # Resolve generation settings from parent (with defaults)
         try:
@@ -47,7 +47,7 @@ class EasyedaProImporter:
             general = {}
         target_output_name = resolve_target_library_name(
             general,
-            category,
+            "",
             sanitize=sanitize_lib_name,
             project_path=self.project_path,
         )
@@ -85,6 +85,10 @@ class EasyedaProImporter:
         """Bridge progress updates into the UI gauge when available."""
         try:
             if self.parent_window is not None:
+                # Batch import drives gauge by item count (20/40/60/...).
+                # Suppress per-item loader progress to avoid jitter.
+                if bool(getattr(self.parent_window, "_batch_import_running", False)):
+                    return
                 gauge = getattr(self.parent_window, "gauge", None)
                 if gauge is not None:
                     wx.CallAfter(gauge.SetRange, max(1, int(total)))
@@ -93,17 +97,31 @@ class EasyedaProImporter:
             # Keep progress best-effort; ignore UI errors
             pass
 
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off"):
+                return False
+        return default
+
     def import_part(
         self,
         lcsc_id: str,
-        category: str,
-        meta: Optional[Dict] = None,
         output_elibz_path: Optional[Path | str] = None,
         update_tables: bool = True,
         log_saved_path: bool = True,
+        skip_models: bool = False,
     ) -> Tuple[bool, Path]:
-        category = sanitize_lib_name(category or "Misc")
-        symbols_path, _footprints_path, models_3d_path, target_name, lib_root = self._compute_outputs(category)
+        symbols_path, _footprints_path, models_3d_path, target_name, lib_root = self._compute_outputs()
         target_path = symbols_path
         elibz_path = target_path / f"{target_name}.elibz"
         if output_elibz_path is not None:
@@ -115,14 +133,20 @@ class EasyedaProImporter:
 
         try:
             self.log(f"Launching ComponentLoader for {lcsc_id} into {target_path}\n")
+            try:
+                general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
+            except Exception:
+                general = {}
+            debug_log = self._as_bool(general.get("debug_log"), False)
             loader = ComponentLoader(
                 kiprjmod=str(self.project_path),
                 target_path=str(target_path),
                 target_name=target_name,
                 progress=self._component_loader_progress,
                 models_dir=str(models_3d_path),
+                debug_log=debug_log,
             )
-            loader.downloadAll([lcsc_id])
+            loader.downloadAll([lcsc_id], skip_models=skip_models)
             if update_tables and (not self.is_system_scope):
                 try:
                     general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}

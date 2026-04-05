@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 import wx  # type: ignore
 
 from .easyedapro.importer import EasyedaProImporter
@@ -53,13 +53,8 @@ class EasyedaImporter:
             lib_dir=self.lib_dir,
         )
 
-    def import_part(
-        self,
-        lcsc_id: str,
-        category: str,
-        meta: Optional[Dict] = None,
-    ) -> Tuple[bool, Path]:
-        return self._impl.import_part(lcsc_id=lcsc_id, category=category, meta=meta)
+    def import_part(self, lcsc_id: str) -> Tuple[bool, Path]:
+        return self._impl.import_part(lcsc_id=lcsc_id)
 
     def __getattr__(self, name: str):
         return getattr(self._impl, name)

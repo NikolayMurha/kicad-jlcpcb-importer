@@ -1,6 +1,7 @@
 """Assign LCSC main dialog wrapping the part selector as primary UI."""
 
 import os
+import re
 import json
 import sys
 import logging
@@ -14,7 +15,13 @@ from typing import Optional, Dict
 
 from .partselector import PartSelectorDialog
 from .settings import SettingsDialog
-from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, PLUGIN_PATH
+from ..core.helpers import (
+    HighResWxSize,
+    loadBitmapScaled,
+    GetScaleFactor,
+    PLUGIN_PATH,
+    apply_button_label_tooltips,
+)
 from ..core.events import (
     EVT_LOGBOX_APPEND_EVENT,
     EVT_MESSAGE_EVENT,
@@ -26,11 +33,18 @@ from ..core.events import (
     EVT_UNZIP_EXTRACTING_STARTED_EVENT,
     EVT_UNZIP_EXTRACTING_PROGRESS_EVENT,
     EVT_UNZIP_EXTRACTING_COMPLETED_EVENT,
+    EVT_SYMBOL_INDEX_BUILD_STARTED_EVENT,
+    EVT_SYMBOL_INDEX_BUILD_PROGRESS_EVENT,
+    EVT_SYMBOL_INDEX_BUILD_COMPLETED_EVENT,
     LogboxAppendEvent,
     MessageEvent,
+    SymbolIndexBuildStartedEvent,
+    SymbolIndexBuildProgressEvent,
+    SymbolIndexBuildCompletedEvent,
 )
 from ..core.library import Library, LibraryState
 from ..importers.importer import EasyedaImporter
+from ..importers.kicad.importer import KicadImporter
 
 import pcbnew as kicad_pcbnew  # pylint: disable=import-error
 
@@ -39,6 +53,100 @@ class KicadProvider:
 
     def get_pcbnew(self):  # pragma: no cover - depends on KiCad runtime
         return kicad_pcbnew
+
+
+class ToolsDialog(wx.Dialog):
+    """Tools dialog with BOM import, re-import all, and clean library actions."""
+
+    def __init__(self, parent: "AssignLCSCMainDialog"):
+        super().__init__(
+            parent,
+            wx.ID_ANY,
+            "Tools",
+            wx.DefaultPosition,
+            HighResWxSize(parent.window, wx.Size(320, -1)),
+            wx.DEFAULT_DIALOG_STYLE,
+        )
+        self._parent = parent
+        scale = parent.scale_factor
+
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        def _make_btn(label: str, icon: str, tooltip: str) -> wx.Button:
+            btn = wx.Button(
+                self,
+                wx.ID_ANY,
+                label,
+                wx.DefaultPosition,
+                HighResWxSize(parent.window, wx.Size(-1, 36)),
+                0,
+            )
+            btn.SetBitmap(loadBitmapScaled(icon, scale))
+            btn.SetBitmapMargins((4, 0))
+            btn.SetToolTip(tooltip)
+            btn.SetMinSize(HighResWxSize(parent.window, wx.Size(-1, 36)))
+            return btn
+
+        self.bom_btn = _make_btn(
+            "Import from BOM",
+            "file-import-outline.png",
+            "Import component list from a BOM CSV/XLSX file",
+        )
+        self.reimport_btn = _make_btn(
+            "Re-import all",
+            "mdi-arrow-collapse-down.png",
+            "Re-import all previously imported parts with current settings",
+        )
+        self.clean_btn = _make_btn(
+            "Clean Library",
+            "mdi-trash-can-outline.png",
+            "Remove stale lib-table entries, orphan footprints and orphan 3D models",
+        )
+
+        scope = str(
+            (parent.settings.get("general", {}) or {}).get("library_scope", "project")
+        ).strip().lower()
+        is_local = scope in ("project", "shared")
+        self.library_btn = _make_btn(
+            "Import from other libraries",
+            "table-arrow-down.png",
+            "Import from EasyEDA or other libraries" if is_local
+            else "Available for Project/Shared scopes only",
+        )
+        self.library_btn.Enable(is_local)
+
+        for btn in (self.bom_btn, self.reimport_btn, self.library_btn, self.clean_btn):
+            root.Add(btn, 0, wx.EXPAND | wx.ALL, 6)
+
+        root.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+
+        close_btn = wx.Button(self, wx.ID_CANCEL, "Close")
+        root.Add(close_btn, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+
+        self.SetSizer(root)
+        root.Fit(self)
+        self.CentreOnParent()
+
+        self.bom_btn.Bind(wx.EVT_BUTTON, self._on_bom)
+        self.reimport_btn.Bind(wx.EVT_BUTTON, self._on_reimport)
+        self.library_btn.Bind(wx.EVT_BUTTON, self._on_library)
+        self.clean_btn.Bind(wx.EVT_BUTTON, self._on_clean)
+
+    def _on_bom(self, _evt=None):
+        self.EndModal(wx.ID_CANCEL)
+        wx.CallAfter(self._parent._on_import_from_bom)
+
+    def _on_reimport(self, _evt=None):
+        self.EndModal(wx.ID_CANCEL)
+        wx.CallAfter(self._parent._on_reimport_all)
+
+    def _on_library(self, _evt=None):
+        self.EndModal(wx.ID_CANCEL)
+        wx.CallAfter(self._parent._open_library_manager)
+
+    def _on_clean(self, _evt=None):
+        self.EndModal(wx.ID_CANCEL)
+        wx.CallAfter(self._parent._on_clean_library)
 
 
 class AssignLCSCMainDialog(PartSelectorDialog):
@@ -66,6 +174,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self._deps_ready = False
         self._deps_prompted = False
         self._deps_installing = False
+        self._symbol_index_warmup_running = False
 
         # Build the PartSelectorDialog with self as the logical parent context
         super().__init__(self, parts={})
@@ -77,19 +186,20 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
         # Insert a topbar with Update button
         topbar = wx.BoxSizer(wx.HORIZONTAL)
+        
         self.update_db_btn = wx.Button(
             self,
             wx.ID_ANY,
             "Update database",
             wx.DefaultPosition,
-            HighResWxSize(self.window, wx.Size(160, -1)),
+            HighResWxSize(self.window, wx.Size(-1, 32)),
             0,
         )
         self.update_db_btn.SetBitmap(
             loadBitmapScaled("mdi-database-import-outline.png", self.scale_factor)
         )
         self.update_db_btn.SetBitmapMargins((2, 0))
-        topbar.Add(self.update_db_btn, 0, wx.ALL, 5)
+        self.update_db_btn.SetToolTip("Update component database")
 
         # Settings button
         self.settings_btn = wx.Button(
@@ -97,49 +207,46 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             wx.ID_ANY,
             "Settings",
             wx.DefaultPosition,
-            HighResWxSize(self.window, wx.Size(120, -1)),
+            HighResWxSize(self.window, wx.Size(32, 32)),
             0,
         )
         self.settings_btn.SetBitmap(
             loadBitmapScaled("mdi-cog-outline.png", self.scale_factor)
         )
         self.settings_btn.SetBitmapMargins((2, 0))
-        topbar.Add(self.settings_btn, 0, wx.ALL, 5)
+        self.settings_btn.SetToolTip("Open settings")
 
-        # BOM import button
-        self.bom_btn = wx.Button(
+        # Tools button (BOM import, re-import, clean library)
+        self.tools_btn = wx.Button(
             self,
             wx.ID_ANY,
-            "Import from BOM",
+            "Tools",
             wx.DefaultPosition,
-            HighResWxSize(self.window, wx.Size(150, -1)),
+            HighResWxSize(self.window, wx.Size(32, 32)),
             0,
         )
-        self.bom_btn.SetBitmap(
-            loadBitmapScaled("mdi-file-document-outline.png", self.scale_factor)
+        self.tools_btn.SetBitmap(
+            loadBitmapScaled("mdi-tools.png", self.scale_factor)
         )
-        self.bom_btn.SetBitmapMargins((2, 0))
-        topbar.Add(self.bom_btn, 0, wx.ALL, 5)
+        self.tools_btn.SetBitmapMargins((2, 0))
+        self.tools_btn.SetToolTip("Import, re-import and library maintenance tools")
 
         # Library Manager button (project scope only)
-        self.library_btn = wx.Button(
-            self,
-            wx.ID_ANY,
-            "Import from other libraries",
-            wx.DefaultPosition,
-            wx.DefaultSize,
-            0,
-        )
-        self.library_btn.SetBitmap(
-            loadBitmapScaled("mdi-file-document-outline.png", self.scale_factor)
-        )
-        self.library_btn.SetBitmapMargins((2, 0))
-        topbar.Add(self.library_btn, 0, wx.ALL, 5)
-        topbar.AddStretchSpacer(1)
+        self._topbar_button_labels = {
+            "update_db_btn": "Update database",
+            "settings_btn": "Settings",
+            "tools_btn": "Tools",
+        }
         self.mode_status_text = wx.StaticText(self, wx.ID_ANY, "")
         self.mode_status_text.SetToolTip("Current library storage mode.")
-        topbar.Add(self.mode_status_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
 
+        self._apply_hide_button_labels_setting()
+        topbar.Add(self.update_db_btn, 0, wx.ALL, 5)
+        topbar.Add(self.settings_btn, 0, wx.ALL, 5)
+        topbar.Add(self.tools_btn, 0, wx.ALL, 5)
+        topbar.AddStretchSpacer(1)
+        topbar.Add(self.mode_status_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        # apply_button_label_tooltips(self, overwrite=True)
         layout = self.GetSizer()
         if layout:
             layout.Insert(0, topbar, 0, wx.EXPAND | wx.ALL, 5)
@@ -198,6 +305,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             self.clear_log_button.Hide()
             self.Layout()
 
+        
+
         # Wire events and actions
         self.update_db_btn.Bind(wx.EVT_BUTTON, lambda _evt: self.update_library())
         # Handle messages and progress locally
@@ -212,13 +321,14 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.Bind(EVT_UNZIP_EXTRACTING_STARTED_EVENT, self._on_progress_reset)
         self.Bind(EVT_UNZIP_EXTRACTING_PROGRESS_EVENT, self._on_progress_update)
         self.Bind(EVT_UNZIP_EXTRACTING_COMPLETED_EVENT, self._on_progress_reset)
+        self.Bind(EVT_SYMBOL_INDEX_BUILD_STARTED_EVENT, self._on_progress_reset)
+        self.Bind(EVT_SYMBOL_INDEX_BUILD_PROGRESS_EVENT, self._on_progress_update)
+        self.Bind(EVT_SYMBOL_INDEX_BUILD_COMPLETED_EVENT, self._on_symbol_index_build_completed)
         # Settings updates from PartSelectorDialog
         from ..core.events import EVT_UPDATE_SETTING  # local import to avoid cycle
         self.Bind(EVT_UPDATE_SETTING, self._on_update_setting)
         self.settings_btn.Bind(wx.EVT_BUTTON, self._open_settings)
-        self.library_btn.Bind(wx.EVT_BUTTON, self._open_library_manager)
-        self.bom_btn.Bind(wx.EVT_BUTTON, self._on_import_from_bom)
-        self._update_library_btn_state()
+        self.tools_btn.Bind(wx.EVT_BUTTON, self._open_tools_dialog)
         # Double-click / Enter on list row triggers import instead of part details
         self.part_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.select_part)
 
@@ -250,6 +360,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 self.library.update()
         except Exception:
             pass
+        self._start_symbol_index_warmup()
 
     def _resolve_python_exe(self) -> str:
         try:
@@ -299,6 +410,71 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if sys.platform.startswith("win"):
             return subprocess.list2cmdline(cmd)
         return " ".join(shlex.quote(str(part)) for part in cmd)
+
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off"):
+                return False
+        return default
+
+    def _start_symbol_index_warmup(self, force: bool = False) -> None:
+        general = (self.settings.get("general", {}) or {})
+        lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+        if lib_format != "kicad":
+            return
+        if not self._as_bool(general.get("kicad_builtin_first"), default=True):
+            return
+        if self._symbol_index_warmup_running:
+            if force:
+                self.log("KiCad builtin: symbol index warmup is already running.\n")
+            return
+
+        scope = str(general.get("library_scope", "project")).strip().lower()
+        if scope not in ("project", "system", "shared"):
+            scope = "project"
+        self._symbol_index_warmup_running = True
+
+        def _worker():
+            started = False
+
+            def _report(value: int) -> None:
+                nonlocal started
+                if not started:
+                    started = True
+                    wx.PostEvent(self, SymbolIndexBuildStartedEvent())
+                wx.PostEvent(self, SymbolIndexBuildProgressEvent(value=max(0, min(100, int(value)))))
+
+            try:
+                importer = KicadImporter(
+                    project_path=self.project_path,
+                    python_exe=self._resolve_python_exe(),
+                    parent_window=self,
+                    scope=scope,
+                    lib_dir=Path(PLUGIN_PATH) / "lib",
+                )
+                warmed = importer.warm_symbol_index_cache(progress_cb=_report)
+                if warmed:
+                    self.log("KiCad builtin: startup symbol index warmup completed.\n")
+                else:
+                    self.log("KiCad builtin: startup symbol index warmup skipped.\n")
+            except Exception as exc:
+                self.log(f"KiCad builtin: startup symbol index warmup failed: {exc}\n")
+            finally:
+                self._symbol_index_warmup_running = False
+                if started:
+                    wx.PostEvent(self, SymbolIndexBuildCompletedEvent())
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # Override: do not assign in this simplified window — show placeholder
     def select_part(self, *_):  # noqa: N802 (KiCad naming)
@@ -360,38 +536,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                     continue
                 if not lcsc_id:
                     continue
-                try:
-                    category = str(self.part_list_model.get_category(item)).strip()
-                except Exception:
-                    category = ""
-                try:
-                    mfr_part = str(self.part_list_model.get_mfr_number(item)).strip()
-                except Exception:
-                    mfr_part = ""
-                try:
-                    manufacturer = str(self.part_list_model.get_manufacturer(item)).strip()
-                except Exception:
-                    manufacturer = ""
-                try:
-                    descr = str(self.part_list_model.get_description(item)).strip()
-                except Exception:
-                    descr = ""
-                try:
-                    attributes_json = str(self.part_list_model.get_attributes(item)).strip()
-                except Exception:
-                    attributes_json = ""
-                rows.append(
-                    (
-                        lcsc_id,
-                        category,
-                        {
-                            "mfr_part": mfr_part,
-                            "manufacturer": manufacturer,
-                            "description": descr,
-                            "attributes_json": attributes_json,
-                        },
-                    )
-                )
+                rows.append(lcsc_id)
             if not rows:
                 wx.PostEvent(
                     self,
@@ -410,15 +555,52 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             return
 
         if len(rows) == 1:
-            lcsc_id, category, meta = rows[0]
-            self._import_part_via_easyeda(lcsc_id, category, meta)
+            self._import_part_via_easyeda(rows[0])
             return
 
         self._import_parts_via_easyeda(rows)
 
+    def _make_importer(self, scope: str):
+        """Return the appropriate importer based on lib_format setting."""
+        general = (self.settings.get("general", {}) or {})
+        lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+        lib_dir = Path(PLUGIN_PATH) / "lib"
+        if lib_format == "kicad":
+            return KicadImporter(
+                project_path=self.project_path,
+                python_exe=self._resolve_python_exe(),
+                parent_window=self,
+                scope=str(scope),
+                lib_dir=lib_dir,
+            )
+        return EasyedaImporter(
+            project_path=self.project_path,
+            python_exe=self._resolve_python_exe(),
+            parent_window=self,
+            scope=str(scope),
+            lib_dir=lib_dir,
+        )
+
     def _import_parts_via_easyeda(self, rows):
-        base = Path(PLUGIN_PATH)
-        lib_dir = base / "lib"
+        # Import pipeline is lcsc_id-only; importer always fetches component data.
+        normalized_rows = []
+        seen: set[str] = set()
+        for item in rows or []:
+            lcsc_id = str(item or "").strip()
+            if not re.match(r"^C\d+$", lcsc_id):
+                continue
+            if lcsc_id in seen:
+                continue
+            seen.add(lcsc_id)
+            normalized_rows.append(lcsc_id)
+
+        if not normalized_rows:
+            wx.PostEvent(
+                self,
+                MessageEvent(title="No LCSC", text="No valid LCSC ID in import list.", style="warning"),
+            )
+            return
+
         scope = self._ensure_library_scope_selected()
         if not scope:
             wx.PostEvent(
@@ -430,30 +612,30 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if btn is not None:
             btn.Enable(False)
 
-        importer = EasyedaImporter(
-            project_path=self.project_path,
-            python_exe=self._resolve_python_exe(),
-            parent_window=self,
-            scope=str(scope),
-            lib_dir=lib_dir,
-        )
+        importer = self._make_importer(scope)
 
         def _worker():
             wx.BeginBusyCursor()
+            self._batch_import_running = True
             ok_count = 0
-            total = len(rows)
+            total = len(normalized_rows)
             try:
-                for idx, (lcsc_id, category, meta) in enumerate(rows, start=1):
+                wx.CallAfter(self.gauge.SetRange, 100)
+                wx.CallAfter(self.gauge.SetValue, 0)
+            except Exception:
+                pass
+            wx.PostEvent(
+                self,
+                LogboxAppendEvent(msg="Import mode: always fetch by LCSC ID.\n"),
+            )
+            try:
+                for idx, lcsc_id in enumerate(normalized_rows, start=1):
                     wx.PostEvent(
                         self,
                         LogboxAppendEvent(msg=f"Importing {lcsc_id} ({idx}/{total})...\n"),
                     )
                     try:
-                        ok, lib_base = importer.import_part(
-                            lcsc_id=lcsc_id,
-                            category=category,
-                            meta=meta or {},
-                        )
+                        ok, lib_base = importer.import_part(lcsc_id=lcsc_id)
                     except Exception as e:
                         wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
                         ok, lib_base = False, self.project_path
@@ -473,6 +655,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                             self,
                             LogboxAppendEvent(msg=f"*********  IMPORT FAILED: {lcsc_id}  *********\n"),
                         )
+                    try:
+                        wx.CallAfter(self.gauge.SetValue, int(idx / total * 100))
+                    except Exception:
+                        pass
                 wx.PostEvent(
                     self,
                     LogboxAppendEvent(
@@ -482,15 +668,18 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 failed_count = total - ok_count
                 wx.CallAfter(self.show_import_status, ok_count, failed_count)
             finally:
+                self._batch_import_running = False
                 wx.EndBusyCursor()
+                try:
+                    wx.CallAfter(self.gauge.SetValue, 0)
+                except Exception:
+                    pass
                 if btn is not None:
                     wx.CallAfter(btn.Enable, True)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _import_part_via_easyeda(self, lcsc_id: str, category: str = "", meta: Optional[Dict] = None):
-        base = Path(PLUGIN_PATH)
-        lib_dir = base / "lib"
+    def _import_part_via_easyeda(self, lcsc_id: str):
         scope = self._ensure_library_scope_selected()
         if not scope:
             wx.PostEvent(
@@ -502,22 +691,12 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if btn is not None:
             btn.Enable(False)
 
-        importer = EasyedaImporter(
-            project_path=self.project_path,
-            python_exe=self._resolve_python_exe(),
-            parent_window=self,
-            scope=str(scope),
-            lib_dir=lib_dir,
-        )
+        importer = self._make_importer(scope)
 
         def _worker():
             wx.BeginBusyCursor()
             try:
-                ok, lib_base = importer.import_part(
-                    lcsc_id=lcsc_id,
-                    category=category,
-                    meta=meta or {},
-                )
+                ok, lib_base = importer.import_part(lcsc_id=lcsc_id)
             except Exception as e:
                 wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
                 ok, lib_base = False, self.project_path
@@ -617,6 +796,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             btn_project.Bind(wx.EVT_BUTTON, _choose_project)
             btn_system.Bind(wx.EVT_BUTTON, _choose_system)
             btn_shared.Bind(wx.EVT_BUTTON, _choose_shared)
+            # apply_button_label_tooltips(dlg, overwrite=True)
 
             dlg.CentreOnParent()
             dlg.ShowModal()
@@ -647,27 +827,24 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         return project_dir, board_name, schematic_name
 
     # Settings persistence
-    # Per-project settings are stored in jlcpcb_importer.json next to the
-    # .kicad_pro file.  Each subproject (PCB_1/, PCB_2/, …) carries its own
-    # file so settings travel with the project and are tracked by git.
-    # KiCad overwrites .kicad_pro on save, so we never touch it.
+    # Plugin-level settings are stored in one shared file under plugin directory.
 
     @property
-    def _project_settings_path(self) -> str:
-        """Return path to jlcpcb_importer.json in the current project directory."""
-        return os.path.join(self.project_path, "jlcpcb_importer.json")
+    def _plugin_settings_path(self) -> str:
+        """Return path to plugin-level settings file."""
+        return os.path.join(PLUGIN_PATH, "jlcpcb_importer.json")
 
     def _load_settings(self):
-        # 1) Per-project jlcpcb_importer.json next to .kicad_pro
+        # 1) Plugin-level persisted settings
         try:
-            with open(self._project_settings_path, encoding="utf-8") as f:
+            with open(self._plugin_settings_path, encoding="utf-8") as f:
                 self.settings = json.load(f)
                 return
         except Exception:
             pass
-        # 2) Plugin-level jlcpcb_importer.json (shipped default)
+        # 2) Plugin defaults
         try:
-            with open(os.path.join(PLUGIN_PATH, "jlcpcb_importer.json"), encoding="utf-8") as f:
+            with open(os.path.join(PLUGIN_PATH, "settings.default.json"), encoding="utf-8") as f:
                 self.settings = json.load(f)
                 return
         except Exception:
@@ -676,7 +853,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     def _save_settings(self):
         try:
-            with open(self._project_settings_path, "w", encoding="utf-8") as f:
+            with open(self._plugin_settings_path, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=2)
         except Exception:
             pass
@@ -690,7 +867,18 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if e.setting in ("library_scope", "lib_path", "lib_prefix"):
             self._sync_shared_meta(changed_setting=e.setting)
         if e.setting == "library_scope":
-            self._update_library_btn_state()
+            self._update_mode_status()
+        if e.section == "general" and e.setting in (
+            "lib_format",
+            "kicad_builtin_first",
+            "kicad_symbol_index_ttl_sec",
+            "kicad_symbol_index_max_libs",
+        ):
+            self._start_symbol_index_warmup(force=True)
+        if e.section == "general" and e.setting == "hide_button_labels":
+            self._apply_hide_button_labels_setting()
+        if e.section == "general" and e.setting == "debug_log":
+            self._apply_logging_level_settings()
 
     def _sync_shared_meta(self, changed_setting: str = ""):
         try:
@@ -734,15 +922,11 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception as exc:
             self.log(f"Shared metadata sync failed: {exc}\n")
 
-    def _update_library_btn_state(self):
-        """Enable Library button for project-scoped library workflows."""
+    def _update_mode_status(self):
+        """Update the mode status label in the toolbar."""
         try:
             scope = (self.settings.get("general", {}) or {}).get("library_scope", "project")
             scope_key = str(scope).strip().lower()
-            is_local = scope_key in ("project", "shared")
-            self.library_btn.Enable(is_local)
-            tip = "" if is_local else "Available for Project/Shared scopes only."
-            self.library_btn.SetToolTip(tip)
             full_label = (
                 "Project"
                 if scope_key == "project"
@@ -757,6 +941,693 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             self.mode_status_text.SetToolTip(f"Current library storage mode: {full_label}")
         except Exception:
             pass
+
+    def _apply_hide_button_labels_setting(self):
+        general = (self.settings.get("general", {}) or {})
+        hide = self._as_bool(general.get("hide_button_labels"), default=False)
+
+        # Search button (PartSelectorDialog)
+        # self.apply_hide_button_labels_setting(hide)
+
+        # Main top toolbar buttons — base size is always 36×36 (set in constructor).
+        # When labels are shown the button expands naturally; when hidden it stays 36×36.
+        for attr_name, label in self._topbar_button_labels.items():
+            btn = getattr(self, attr_name, None)
+            if btn is None:
+                continue
+            
+            if hide:
+                btn.SetWindowStyleFlag(0)
+                btn.InvalidateBestSize()
+                btn.SetMinSize(HighResWxSize(self.window, wx.Size(36, 36)))
+                btn.SetSize(HighResWxSize(self.window, wx.Size(36, 36)))
+                btn.Refresh()
+            else:
+                btn.SetWindowStyleFlag(1)
+                btn.InvalidateBestSize()
+                btn.SetMinSize(HighResWxSize(self.window, wx.Size(-1, 36)))
+                btn.SetSize(HighResWxSize(self.window, wx.Size(-1, 36)))
+                btn.Refresh()
+                
+        self.Layout()
+
+        
+
+    @staticmethod
+    def _normalize_package_from_footprint(fp_stem: str) -> str:
+        """Extract EIC size code or package name from a footprint stem.
+
+        Examples:
+            "C0402"                        → "0402"
+            "C_0402_1005Metric_..."        → "0402"
+            "SOT-23-3_L2.9-W1.3-..."      → "SOT-23-3"
+            "LGA-14_L5.0-W3.0-..."        → "LGA-14"
+        """
+        if not fp_stem:
+            return ""
+        # Single letter prefix + optional underscore + 4-digit EIC code: C0402, R_0603
+        m = re.match(r"^[A-Za-z]_?(\d{4})\b", fp_stem)
+        if m:
+            return m.group(1)
+        # Already a bare 4-digit size code
+        if re.match(r"^\d{4}$", fp_stem):
+            return fp_stem
+        # Package name up to first underscore: SOT-23-3_L2.9... → SOT-23-3
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9\-]+?)_", fp_stem)
+        if m:
+            return m.group(1)
+        return fp_stem
+
+    def _collect_reimport_rows(self) -> list[str]:
+        """Collect unique LCSC IDs from previously imported libraries."""
+        import zipfile
+        import json as _json
+        from ..core.sym_lib_reader import get_connected_elibz_libs
+
+        ids: list[str] = []
+        seen: set[str] = set()
+        project_path = Path(self.project_path)
+        self.log(f"Re-import: scanning project path: {project_path}\n")
+
+        def _add_lcsc(candidate: str) -> bool:
+            lcsc_id = str(candidate or "").strip().upper()
+            if not re.match(r"^C\d+$", lcsc_id):
+                return False
+            if lcsc_id in seen:
+                return False
+            seen.add(lcsc_id)
+            ids.append(lcsc_id)
+            return True
+
+        # 1. EasyEDA Pro .elibz libraries — LCSC ID stored as product_code
+        elibz_paths: dict = {}
+        try:
+            for alias, lib_path in get_connected_elibz_libs(project_path, include_user_tables=False):
+                elibz_paths[str(lib_path)] = alias
+        except Exception:
+            pass
+        try:
+            for elibz_file in project_path.glob("*.elibz"):
+                key = str(elibz_file)
+                if key not in elibz_paths:
+                    elibz_paths[key] = elibz_file.stem
+        except Exception:
+            pass
+
+        self.log(f"Re-import: found {len(elibz_paths)} .elibz lib(s)\n")
+        for lib_path_str, alias in elibz_paths.items():
+            self.log(f"Re-import:   elibz: {lib_path_str}\n")
+            try:
+                with zipfile.ZipFile(lib_path_str, "r") as zf:
+                    data = _json.loads(zf.read("device.json").decode("utf-8"))
+                count_before = len(ids)
+                for _uuid, dev in data.get("devices", {}).items():
+                    _add_lcsc(str(dev.get("product_code") or "").strip())
+                self.log(f"Re-import:   → {len(ids) - count_before} part(s) found\n")
+            except Exception as exc:
+                self.log(f"Re-import:   ERROR reading elibz: {exc}\n")
+
+        # 2. KiCad .kicad_sym — scan only explicit project sym-lib-table entries.
+        try:
+            from ..core.sym_lib_reader import parse_lib_table, resolve_uri
+            table_files: list = []
+            proj_tbl = project_path / "sym-lib-table"
+            if proj_tbl.exists():
+                table_files.append(proj_tbl)
+                self.log(f"Re-import: project sym-lib-table: {proj_tbl}\n")
+            else:
+                self.log(f"Re-import: no project sym-lib-table at {proj_tbl}\n")
+
+            kicad_seen: set = set()
+            for tbl in table_files:
+                entries = list(parse_lib_table(tbl))
+                self.log(f"Re-import: {tbl.name} has {len(entries)} entries\n")
+                for name, lib_type, uri in entries:
+                    if lib_type not in ("KiCad", "KiCad_Sym") or name in kicad_seen:
+                        continue
+                    lib_path = Path(resolve_uri(uri, project_path, table_dir=tbl.parent))
+                    self.log(f"Re-import:   kicad_sym [{name}]: {lib_path} exists={lib_path.exists()}\n")
+                    if not lib_path.exists():
+                        continue
+                    kicad_seen.add(name)
+                    try:
+                        count_before = len(ids)
+                        content = lib_path.read_text(encoding="utf-8", errors="replace")
+                        # Common property names seen in generated symbols:
+                        #   - "LCSC Part"
+                        #   - "Supplier Part"
+                        # plus LCSC links in Datasheet/URL fields.
+                        patterns = [
+                            r'\(property\s+"[^"]*LCSC[^"]*"\s+"(C\d+)"',
+                            r'\(property\s+"[^"]*Supplier[^"]*Part[^"]*"\s+"(C\d+)"',
+                            r'lcsc\.com/[^"\s]*_(C\d+)\.html',
+                            r'lcsc\.com/[^"\s]*/(C\d+)\.html',
+                        ]
+                        for pattern in patterns:
+                            for m in re.finditer(pattern, content, flags=re.IGNORECASE):
+                                _add_lcsc(m.group(1))
+
+                        added = len(ids) - count_before
+                        if added:
+                            self.log(f"Re-import:     → {added} symbol-linked LCSC ID(s) found\n")
+                    except Exception as exc:
+                        self.log(f"Re-import:   ERROR reading kicad_sym: {exc}\n")
+        except Exception as exc:
+            self.log(f"Re-import: kicad_sym scan error: {exc}\n")
+
+        self.log(f"Re-import: total {len(ids)} part(s) collected\n")
+
+        return ids
+
+    def _on_reimport_all(self, _evt=None):
+        lcsc_ids = self._collect_reimport_rows()
+        if not lcsc_ids:
+            wx.PostEvent(
+                self,
+                MessageEvent(
+                    title="Nothing to re-import",
+                    text="No previously imported parts found in connected libraries.",
+                    style="warning",
+                ),
+            )
+            return
+
+        dlg = wx.MessageDialog(
+            self,
+            f"Re-import {len(lcsc_ids)} part(s) using current settings?\n\n"
+            "This will overwrite existing symbols and footprints.",
+            "Re-import all",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result != wx.ID_YES:
+            return
+
+        self._import_parts_via_easyeda(lcsc_ids)
+
+    def _open_tools_dialog(self, _evt=None):
+        """Open the Tools dialog with BOM import, re-import, and library cleanup."""
+        dlg = None
+        try:
+            dlg = ToolsDialog(self)
+            dlg.ShowModal()
+        finally:
+            try:
+                if dlg is not None:
+                    dlg.Destroy()
+            except Exception:
+                pass
+
+    def _on_clean_library(self, _evt=None):
+        """Scan for stale entries / orphans, confirm, then delete."""
+
+        def _scan() -> dict:
+            """Collect stats without deleting anything. Returns result dict."""
+            def _safe_resolve(path: Path) -> Path:
+                try:
+                    return path.resolve()
+                except Exception:
+                    return path
+
+            def _is_within_any(path: Path, roots: list[Path]) -> bool:
+                rp = _safe_resolve(path)
+                for root in roots:
+                    rr = _safe_resolve(root)
+                    try:
+                        if rp == rr or rr in rp.parents:
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            result = {
+                "stale_sym_libs": [],   # (name, path) missing sym-lib-table entries
+                "stale_fp_libs": [],    # (name, path) missing fp-lib-table entries
+                "orphan_fps": [],       # Path objects — .kicad_mod not referenced by any symbol
+                "orphan_models": [],    # Path objects — 3D models not referenced by any footprint
+                "managed_fp_roots": [],
+                "managed_model_roots": [],
+                "scan_fp_dirs": [],
+                "errors": [],
+            }
+            project_path = Path(self.project_path)
+            general = (self.settings.get("general", {}) or {})
+            scope = str(general.get("library_scope", "project")).strip().lower()
+            project_fp_dirs: list[Path] = []
+
+            # Resolve cleanup roots once and keep scan strictly inside them.
+            # This prevents deleting footprints from unrelated/global libraries.
+            try:
+                from ..core.lib_paths import resolve_lib_root
+
+                if scope == "system":
+                    third_party = (
+                        os.environ.get("KICAD10_3RD_PARTY")
+                        or os.environ.get("KICAD9_3RD_PARTY")
+                    )
+                    base_path = Path(third_party) if third_party else (Path(PLUGIN_PATH) / "libraries")
+                    plugin_folder = Path(PLUGIN_PATH).resolve().name
+                    result["managed_fp_roots"] = [
+                        str(_safe_resolve(base_path / "footprints" / plugin_folder))
+                    ]
+                    result["managed_model_roots"] = [
+                        str(_safe_resolve(base_path / "3dmodels" / plugin_folder))
+                    ]
+                else:
+                    lib_root, _ = resolve_lib_root(general, project_path)
+                    root = _safe_resolve(lib_root)
+                    result["managed_fp_roots"] = [str(root)]
+                    result["managed_model_roots"] = [str(root)]
+            except Exception as exc:
+                result["errors"].append(f"cleanup root resolve: {exc}")
+
+            # ── Step 1: stale lib-table entries ──
+            try:
+                from ..core.sym_lib_reader import resolve_uri
+                from ..core.lib_paths import resolve_lib_root
+
+                table_roots: set[Path] = {project_path}
+                if scope in ("project", "shared"):
+                    try:
+                        lib_root, _ = resolve_lib_root(general, project_path)
+                        table_roots.add(_safe_resolve(lib_root))
+                    except Exception:
+                        pass
+
+                def _collect_stale(tbl_path):
+                    stale = []
+                    try:
+                        content = tbl_path.read_text(encoding="utf-8", errors="replace")
+                        for m in re.finditer(
+                            r'\(lib\s+\(name\s+"([^"]+)"\)[^)]*\(uri\s+"([^"]+)"\)', content
+                        ):
+                            name, uri = m.group(1), m.group(2)
+                            try:
+                                p = Path(resolve_uri(uri, project_path, table_dir=tbl_path.parent))
+                                if not p.exists():
+                                    stale.append((name, str(p)))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    return stale
+
+                seen_sym: set = set()
+                for tbl in {r / "sym-lib-table" for r in table_roots}:
+                    if tbl.exists():
+                        for entry in _collect_stale(tbl):
+                            if entry[0] not in seen_sym:
+                                seen_sym.add(entry[0])
+                                result["stale_sym_libs"].append(entry)
+
+                seen_fp: set = set()
+                for tbl in {r / "fp-lib-table" for r in table_roots}:
+                    if tbl.exists():
+                        for entry in _collect_stale(tbl):
+                            if entry[0] not in seen_fp:
+                                seen_fp.add(entry[0])
+                                result["stale_fp_libs"].append(entry)
+
+            except Exception as exc:
+                result["errors"].append(f"lib-table scan: {exc}")
+
+            # ── Step 2: orphan footprints ──
+            try:
+                from ..core.sym_lib_reader import get_connected_sym_libs, parse_lib_table, resolve_uri
+                # Collect footprint names referenced by project/builtin symbols only.
+                sym_fps: set = set()
+                for _alias, sym_path in get_connected_sym_libs(project_path, include_user_tables=False):
+                    try:
+                        content = sym_path.read_text(encoding="utf-8", errors="replace")
+                        for m in re.finditer(r'\(property\s+"Footprint"\s+"([^"]+)"', content):
+                            fp_ref = m.group(1).strip()
+                            if ":" in fp_ref:
+                                sym_fps.add(fp_ref.split(":", 1)[1])
+                    except Exception:
+                        pass
+
+                managed_fp_roots = [Path(p) for p in (result.get("managed_fp_roots") or [])]
+                fp_dirs_set: set[Path] = set()
+                skipped_external = 0
+
+                # Read project/shared fp tables and keep only libs under managed roots.
+                table_candidates = [project_path / "fp-lib-table"]
+                if scope == "shared":
+                    for root in managed_fp_roots:
+                        table_candidates.append(root / "fp-lib-table")
+
+                for fp_tbl in table_candidates:
+                    if not fp_tbl.exists():
+                        continue
+                    for _name, lib_type, uri in parse_lib_table(fp_tbl):
+                        if lib_type not in ("KiCad", "KiCad_Fp"):
+                            continue
+                        p = Path(resolve_uri(uri, project_path, table_dir=fp_tbl.parent))
+                        if not p.is_dir():
+                            continue
+                        rp = _safe_resolve(p)
+                        if not _is_within_any(rp, managed_fp_roots):
+                            skipped_external += 1
+                            continue
+                        fp_dirs_set.add(rp)
+
+                # Also include all local managed *.pretty directories.
+                for root in managed_fp_roots:
+                    rr = _safe_resolve(root)
+                    if not rr.is_dir():
+                        continue
+                    for pretty in rr.glob("*.pretty"):
+                        if pretty.is_dir():
+                            fp_dirs_set.add(_safe_resolve(pretty))
+
+                project_fp_dirs = sorted(fp_dirs_set)
+                result["scan_fp_dirs"] = [p.as_posix() for p in project_fp_dirs]
+                if skipped_external:
+                    result["errors"].append(
+                        f"footprint scan: skipped {skipped_external} external fp-lib-table entr{('y' if skipped_external == 1 else 'ies')}"
+                    )
+
+                # Also protect footprints that are placed on PCBs or schematics
+                # even if the symbol library definition no longer references them
+                # (e.g. after reimport changed the symbol's footprint property).
+                try:
+                    lib_aliases: set[str] = set()
+                    for fp_dir in project_fp_dirs:
+                        stem = fp_dir.name
+                        lib_aliases.add(stem[:-len(".pretty")] if stem.endswith(".pretty") else stem)
+                    pcb_scan_roots: list[Path] = []
+                    if scope == "shared":
+                        for root in managed_fp_roots:
+                            parent = _safe_resolve(root).parent
+                            if parent.is_dir():
+                                pcb_scan_roots.append(parent)
+                    else:
+                        pcb_scan_roots.append(project_path)
+                    for scan_root in pcb_scan_roots:
+                        for pcb_file in scan_root.rglob("*.kicad_pcb"):
+                            try:
+                                content = pcb_file.read_text(encoding="utf-8", errors="replace")
+                                for m in re.finditer(r'\(footprint\s+"([^"]+)"', content):
+                                    fp_ref = m.group(1).strip()
+                                    if ":" in fp_ref:
+                                        lib_alias, fp_name = fp_ref.split(":", 1)
+                                        if lib_alias in lib_aliases:
+                                            sym_fps.add(fp_name)
+                            except Exception:
+                                pass
+                        for sch_file in scan_root.rglob("*.kicad_sch"):
+                            try:
+                                content = sch_file.read_text(encoding="utf-8", errors="replace")
+                                for m in re.finditer(r'\(property\s+"Footprint"\s+"([^"]+)"', content):
+                                    fp_ref = m.group(1).strip()
+                                    if ":" in fp_ref:
+                                        lib_alias, fp_name = fp_ref.split(":", 1)
+                                        if lib_alias in lib_aliases:
+                                            sym_fps.add(fp_name)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                for fp_dir in project_fp_dirs:
+                    for mod in fp_dir.glob("*.kicad_mod"):
+                        if mod.stem not in sym_fps:
+                            result["orphan_fps"].append(mod)
+            except Exception as exc:
+                result["errors"].append(f"footprint scan: {exc}")
+
+            # ── Step 3: orphan 3D models ──
+            try:
+                model_extensions = {".step", ".stp", ".wrl", ".stl"}
+                managed_model_roots = [Path(p) for p in (result.get("managed_model_roots") or [])]
+                orphan_fp_paths = {str(_safe_resolve(p)) for p in result.get("orphan_fps", [])}
+                # Build set of 3D model filenames referenced by footprints in project fp libs
+                referenced_models: set = set()
+                for fp_dir in project_fp_dirs:
+                    for mod in fp_dir.glob("*.kicad_mod"):
+                        if str(_safe_resolve(mod)) in orphan_fp_paths:
+                            # This footprint is planned for deletion in the same cleanup run.
+                            # Do not keep its 3D models alive.
+                            continue
+                        try:
+                            content = mod.read_text(encoding="utf-8", errors="replace")
+                            for m in re.finditer(r'\(model\s+"([^"]+)"', content):
+                                referenced_models.add(Path(m.group(1).strip()).name.lower())
+                        except Exception:
+                            pass
+                # Also scan PCB files for models referenced by placed footprints.
+                # PCB footprint instances embed model paths directly and may reference
+                # models that have no corresponding .kicad_mod template (e.g. after
+                # a reimport changed the footprint name but the PCB was not updated yet).
+                try:
+                    pcb_model_roots: list[Path] = []
+                    if scope == "shared":
+                        for root in managed_model_roots:
+                            parent = _safe_resolve(root).parent
+                            if parent.is_dir():
+                                pcb_model_roots.append(parent)
+                    else:
+                        pcb_model_roots.append(project_path)
+                    for scan_root in pcb_model_roots:
+                        for pcb_file in scan_root.rglob("*.kicad_pcb"):
+                            try:
+                                content = pcb_file.read_text(encoding="utf-8", errors="replace")
+                                for m in re.finditer(r'\(model\s+"([^"]+)"', content):
+                                    referenced_models.add(Path(m.group(1).strip()).name.lower())
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # Search for 3D model files only in managed model directories.
+                model_search_dirs: set[Path] = set()
+                for fp_dir in project_fp_dirs:
+                    parent = fp_dir.parent
+                    for candidate in (
+                        parent / "3dmodels",
+                        parent / "EASYEDA_MODELS",
+                        parent / f"{fp_dir.stem}.3dshapes",
+                    ):
+                        if candidate.is_dir() and _is_within_any(candidate, managed_model_roots):
+                            model_search_dirs.add(_safe_resolve(candidate))
+                for root in managed_model_roots:
+                    rr = _safe_resolve(root)
+                    if rr.is_dir():
+                        model_search_dirs.add(rr)
+                for search_dir in model_search_dirs:
+                    for model_file in search_dir.rglob("*"):
+                        if model_file.suffix.lower() in model_extensions:
+                            if model_file.name.lower() not in referenced_models:
+                                result["orphan_models"].append(model_file)
+            except Exception as exc:
+                result["errors"].append(f"3D model scan: {exc}")
+
+            # Deduplicate by resolved path so counts match preview and deletion list.
+            try:
+                uniq_fp: dict[str, Path] = {}
+                for p in result["orphan_fps"]:
+                    rp = _safe_resolve(Path(p))
+                    uniq_fp[str(rp)] = rp
+                result["orphan_fps"] = list(uniq_fp.values())
+            except Exception:
+                pass
+            try:
+                uniq_models: dict[str, Path] = {}
+                for p in result["orphan_models"]:
+                    rp = _safe_resolve(Path(p))
+                    uniq_models[str(rp)] = rp
+                result["orphan_models"] = list(uniq_models.values())
+            except Exception:
+                pass
+
+            return result
+
+        def _do_clean(stats: dict):
+            """Actually delete everything found during scan."""
+            project_path = Path(self.project_path)
+            managed_fp_roots = [Path(p) for p in (stats.get("managed_fp_roots") or [])]
+            managed_model_roots = [Path(p) for p in (stats.get("managed_model_roots") or [])]
+            removed_sym_entries = 0
+            removed_fp_entries = 0
+            deleted_fp = 0
+            deleted_3d = 0
+            skipped_fp = 0
+            skipped_3d = 0
+            clean_errors = 0
+
+            def _safe_resolve(path: Path) -> Path:
+                try:
+                    return path.resolve()
+                except Exception:
+                    return path
+
+            def _is_within_any(path: Path, roots: list[Path]) -> bool:
+                rp = _safe_resolve(path)
+                for root in roots:
+                    rr = _safe_resolve(root)
+                    try:
+                        if rp == rr or rr in rp.parents:
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            # Prune lib-table entries (project + shared lib_root)
+            if stats["stale_sym_libs"] or stats["stale_fp_libs"]:
+                try:
+                    from ..core.lib_tables import LibTablesManager
+                    from ..core.lib_paths import resolve_lib_root
+                    general = (self.settings.get("general", {}) or {})
+                    scope = str(general.get("library_scope", "project")).strip().lower()
+                    table_roots: set[Path] = {project_path}
+                    if scope in ("project", "shared"):
+                        try:
+                            lib_root, _ = resolve_lib_root(general, project_path)
+                            table_roots.add(lib_root)
+                        except Exception:
+                            pass
+                    total_sym, total_fp = 0, 0
+                    for root in table_roots:
+                        mgr = LibTablesManager(root, log=self.log)
+                        s, f = mgr.prune_invalid_table_paths(project_path=project_path)
+                        total_sym += s
+                        total_fp += f
+                    removed_sym_entries = total_sym
+                    removed_fp_entries = total_fp
+                    self.log(f"Clean Library: removed {total_sym} stale symbol lib(s), {total_fp} stale footprint lib(s)\n")
+                except Exception as exc:
+                    clean_errors += 1
+                    self.log(f"Clean Library: lib-table prune error: {exc}\n")
+
+            # Delete orphan footprints
+            for mod in stats["orphan_fps"]:
+                if not _is_within_any(mod, managed_fp_roots):
+                    skipped_fp += 1
+                    self.log(
+                        f"Clean Library: skipped footprint outside managed roots: {_safe_resolve(mod)}\n"
+                    )
+                    continue
+                try:
+                    mod.unlink()
+                    deleted_fp += 1
+                    self.log(f"Clean Library: deleted footprint {mod.name}\n")
+                except Exception as exc:
+                    clean_errors += 1
+                    self.log(f"Clean Library: could not delete {mod.name}: {exc}\n")
+
+            # Delete orphan 3D models
+            for model_file in stats["orphan_models"]:
+                if not _is_within_any(model_file, managed_model_roots):
+                    skipped_3d += 1
+                    self.log(
+                        f"Clean Library: skipped 3D model outside managed roots: {_safe_resolve(model_file)}\n"
+                    )
+                    continue
+                try:
+                    model_file.unlink()
+                    deleted_3d += 1
+                    self.log(f"Clean Library: deleted 3D model {model_file.name}\n")
+                except Exception as exc:
+                    clean_errors += 1
+                    self.log(f"Clean Library: could not delete {model_file.name}: {exc}\n")
+
+            self.log("Clean Library: done.\n")
+            summary = (
+                "Clean Library completed.\n\n"
+                f"Removed stale entries: {removed_sym_entries} symbol, {removed_fp_entries} footprint\n"
+                f"Deleted files: {deleted_fp} footprint, {deleted_3d} 3D model"
+            )
+            if skipped_fp or skipped_3d:
+                summary += f"\nSkipped (outside managed roots): {skipped_fp} footprint, {skipped_3d} 3D model"
+            if clean_errors:
+                summary += f"\nErrors: {clean_errors} (see console log)"
+            wx.CallAfter(
+                wx.MessageBox,
+                summary,
+                "Clean Library",
+                (wx.OK | (wx.ICON_WARNING if clean_errors else wx.ICON_INFORMATION)),
+                self,
+            )
+
+        def _worker():
+            self.log("Clean Library: scanning...\n")
+            stats = _scan()
+
+            def _log_paths(title: str, items):
+                if not items:
+                    return
+                self.log(f"Clean Library: {title} ({len(items)}):\n")
+                for p in sorted({_p for _p in items}, key=lambda x: str(x)):
+                    self.log(f"  - {p}\n")
+
+            for err in stats["errors"]:
+                self.log(f"Clean Library: warning: {err}\n")
+
+            n_sym = len(stats["stale_sym_libs"])
+            n_fp_lib = len(stats["stale_fp_libs"])
+            n_fp = len(stats["orphan_fps"])
+            n_3d = len(stats["orphan_models"])
+            total = n_sym + n_fp_lib + n_fp + n_3d
+
+            fp_roots = ", ".join(stats.get("managed_fp_roots") or []) or "—"
+            model_roots = ", ".join(stats.get("managed_model_roots") or []) or "—"
+            self.log(f"Clean Library: managed footprint root(s): {fp_roots}\n")
+            self.log(f"Clean Library: managed model root(s): {model_roots}\n")
+            self.log(
+                f"Clean Library: scanning {len(stats.get('scan_fp_dirs') or [])} managed footprint librar"
+                f"{'y' if len(stats.get('scan_fp_dirs') or []) == 1 else 'ies'}\n"
+            )
+            self.log(
+                f"Clean Library: found {n_sym} stale symbol lib(s), "
+                f"{n_fp_lib} stale footprint lib(s), "
+                f"{n_fp} orphan footprint(s), "
+                f"{n_3d} orphan 3D model(s)\n"
+            )
+
+            if n_sym:
+                self.log(f"Clean Library: stale sym-lib-table entries to remove ({n_sym}):\n")
+                for name, path in stats["stale_sym_libs"]:
+                    self.log(f"  - {name}: {path}\n")
+            if n_fp_lib:
+                self.log(f"Clean Library: stale fp-lib-table entries to remove ({n_fp_lib}):\n")
+                for name, path in stats["stale_fp_libs"]:
+                    self.log(f"  - {name}: {path}\n")
+            _log_paths("orphan footprint files to delete", stats["orphan_fps"])
+            _log_paths("orphan 3D model files to delete", stats["orphan_models"])
+
+            if total == 0:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    "Nothing to clean — everything looks good.",
+                    "Clean Library",
+                    wx.OK | wx.ICON_INFORMATION,
+                    self,
+                )
+                return
+
+            lines = []
+            if n_sym:
+                lines.append(f"  • {n_sym} stale symbol library entry(ies) in sym-lib-table")
+            if n_fp_lib:
+                lines.append(f"  • {n_fp_lib} stale footprint library entry(ies) in fp-lib-table")
+            if n_fp:
+                lines.append(f"  • {n_fp} orphan footprint file(s) (.kicad_mod)")
+            if n_3d:
+                lines.append(f"  • {n_3d} orphan 3D model file(s) (.step/.wrl/.stl)")
+            msg = "The following will be permanently deleted:\n\n" + "\n".join(lines) + "\n\nProceed?"
+
+            def _confirm():
+                dlg = wx.MessageDialog(
+                    self, msg, "Clean Library", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING
+                )
+                result = dlg.ShowModal()
+                dlg.Destroy()
+                if result == wx.ID_YES:
+                    threading.Thread(target=_do_clean, args=(stats,), daemon=True).start()
+
+            wx.CallAfter(_confirm)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _open_library_manager(self, *_):
         from .library_panel import LibraryManagerDialog
@@ -862,17 +1733,30 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     # Progress handlers
     def _on_progress_reset(self, *_):
+        if getattr(self, "_batch_import_running", False):
+            return
         if hasattr(self, "gauge") and self.gauge:
             self.gauge.SetRange(100)
             self.gauge.SetValue(0)
 
     def _on_progress_update(self, e):
+        if getattr(self, "_batch_import_running", False):
+            return
         if hasattr(self, "gauge") and self.gauge:
             try:
                 val = int(e.value)
             except Exception:
                 val = 0
             self.gauge.SetValue(max(0, min(100, val)))
+
+    def _on_symbol_index_build_completed(self, *_):
+        if getattr(self, "_batch_import_running", False):
+            return
+        if hasattr(self, "gauge") and self.gauge:
+            try:
+                self.gauge.SetValue(0)
+            except Exception:
+                pass
 
     def _on_db_download_completed(self, *_):
         """Enable search and refresh categories when DB is ready."""
@@ -917,6 +1801,30 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self._ui_log_handler.setLevel(logging.DEBUG)
         self._ui_log_handler.setFormatter(formatter)
         root.addHandler(self._ui_log_handler)
+        self._apply_logging_level_settings()
+
+    def _apply_logging_level_settings(self) -> None:
+        try:
+            general = (self.settings.get("general", {}) or {})
+        except Exception:
+            general = {}
+        debug_enabled = self._as_bool(general.get("debug_log"), default=False)
+        level = logging.DEBUG if debug_enabled else logging.INFO
+
+        root = logging.getLogger()
+        root.setLevel(level)
+        try:
+            if hasattr(self, "_ui_log_handler") and self._ui_log_handler is not None:
+                self._ui_log_handler.setLevel(level)
+        except Exception:
+            pass
+
+        noisy = ("urllib3", "requests")
+        for name in noisy:
+            try:
+                logging.getLogger(name).setLevel(logging.DEBUG if debug_enabled else logging.WARNING)
+            except Exception:
+                pass
 
     # Dependency check and interactive installer
     def _check_and_offer_install_deps(self, force_prompt: bool = False):

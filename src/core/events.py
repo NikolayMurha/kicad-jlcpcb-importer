@@ -6,6 +6,10 @@ DownloadStartedEvent, EVT_DOWNLOAD_STARTED_EVENT = NewEvent()
 DownloadProgressEvent, EVT_DOWNLOAD_PROGRESS_EVENT = NewEvent()
 DownloadCompletedEvent, EVT_DOWNLOAD_COMPLETED_EVENT = NewEvent()
 
+SymbolIndexBuildStartedEvent, EVT_SYMBOL_INDEX_BUILD_STARTED_EVENT = NewEvent()
+SymbolIndexBuildProgressEvent, EVT_SYMBOL_INDEX_BUILD_PROGRESS_EVENT = NewEvent()
+SymbolIndexBuildCompletedEvent, EVT_SYMBOL_INDEX_BUILD_COMPLETED_EVENT = NewEvent()
+
 UnzipCombiningStartedEvent, EVT_UNZIP_COMBINING_STARTED_EVENT = NewEvent()
 UnzipCombiningProgressEvent, EVT_UNZIP_COMBINING_PROGRESS_EVENT = NewEvent()
 UnzipExtractingStartedEvent, EVT_UNZIP_EXTRACTING_STARTED_EVENT = NewEvent()

@@ -17,7 +17,7 @@ except Exception:  # Pillow is declared in requirements.txt
 from .datamodel import PartSelectorDataModel
 from ..core.derive_params import params_for_part  # pylint: disable=import-error
 from ..core.events import AssignPartsEvent, UpdateSetting
-from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor
+from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, apply_button_label_tooltips
 from .partdetails import PartDetailsDialog
 from ..core.lcsc_api import LCSC_API
 from ..core.library import LibraryState
@@ -345,12 +345,21 @@ class PartSelectorDialog(wx.Dialog):
             5,
         )
         # Explicit search button to the right of the keyword field
+        self._search_button_label = "Search"
+        self._search_button_size_with_label = HighResWxSize(
+            getattr(self.parent, "window", self),
+            wx.Size(100, -1),
+        )
+        self._search_button_size_icon_only = HighResWxSize(
+            getattr(self.parent, "window", self),
+            wx.Size(36, -1),
+        )
         self.search_button = wx.Button(
             self,
             wx.ID_ANY,
-            "Search",
+            self._search_button_label,
             wx.DefaultPosition,
-            HighResWxSize(getattr(self.parent, "window", self), wx.Size(100, -1)),
+            self._search_button_size_with_label,
             0,
         )
         self.search_button.SetBitmap(loadBitmapScaled("mdi-magnify.png", self.scale_factor))
@@ -818,6 +827,13 @@ class PartSelectorDialog(wx.Dialog):
         self.SetSizer(layout)
         self.Layout()
         self.Centre(wx.BOTH)
+        apply_button_label_tooltips(self, overwrite=True)
+        self.apply_hide_button_labels_setting(
+            self._as_bool(
+                (self.settings.get("general", {}) or {}).get("hide_button_labels"),
+                default=False,
+            )
+        )
         self.enable_toolbar_buttons(False)
 
         # initiate the initial search now that the window has been constructed
@@ -869,6 +885,33 @@ class PartSelectorDialog(wx.Dialog):
 
         if ready:
             self.refresh_categories()
+
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off"):
+                return False
+        return default
+
+    def apply_hide_button_labels_setting(self, hidden: bool):
+        try:
+            hide = bool(hidden)
+            self.search_button.SetLabel("" if hide else self._search_button_label)
+            self.search_button.SetMinSize(
+                self._search_button_size_icon_only if hide else self._search_button_size_with_label
+            )
+            self.Layout()
+        except Exception:
+            self.logger.exception("Failed to apply hide_button_labels on search button")
 
     def refresh_categories(self):
         try:
@@ -1123,8 +1166,8 @@ class PartSelectorDialog(wx.Dialog):
             self._pageurl = ""
             return
         data = result.get("data", {}).get("data", {})
-        self._pdfurl = data.get("dataManualUrl") or ""
-        self._pageurl = data.get("lcscGoodsUrl") or ""
+        self._pdfurl = self._lcsc_api.resolve_datasheet_url(data)
+        self._pageurl = self._lcsc_api.resolve_part_page_url(data, lcsc_number=lcsc)
         # Right-side preview image removed; keep URLs only
         
     def get_scaled_bitmap(self, url, width, height):
@@ -1149,8 +1192,9 @@ class PartSelectorDialog(wx.Dialog):
             webbrowser.open(self._pdfurl)
 
     def open_lcsc_page(self, *_):
-        if self._pageurl:
-            webbrowser.open(self._pageurl)
+        url = self._pageurl or self._lcsc_api.build_lcsc_search_url(self._selected_lcsc or "")
+        if url:
+            webbrowser.open(url)
 
     def help(self, *_):
         """Show message box with help instructions."""
@@ -1479,7 +1523,7 @@ class PartSelectorDialog(wx.Dialog):
                     self.log_toggle_button.SetBitmap(
                         loadBitmapScaled("mdi-console-line.png", self.scale_factor)
                     )
-                    self.log_toggle_button.SetToolTip("Show log")
+                    self.log_toggle_button.SetToolTip("")
             except Exception:
                 pass
             # Re-layout the entire window

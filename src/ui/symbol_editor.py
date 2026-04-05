@@ -292,6 +292,7 @@ class SymbolEditor:
 
         # Normalize pin style only for explicitly passive-like categories.
         # Do not touch transistor/IC symbols here.
+        cat = (category or "").lower()
         passive_like = any(
             key in cat
             for key in ("resistor", "capacitor", "inductor", "ferrite", "bead", "diode")

@@ -2,8 +2,10 @@
 
 import io
 import json
+import re
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import quote_plus
 
 import requests  # pylint: disable=import-error
 
@@ -15,6 +17,8 @@ class LCSC_API:
     EASYEDA_API_BASE = "https://pro.easyeda.com/api"
     EASYEDA_API_V2_BASE = "https://pro.easyeda.com/api/v2"
     EASYEDA_STEP_BASE = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/"
+    LCSC_SEARCH_BASE = "https://www.lcsc.com/search"
+    LCSC_PRODUCT_BASE = "https://www.lcsc.com/product-detail"
 
     def __init__(self):
         self.headers = {
@@ -145,3 +149,99 @@ class LCSC_API:
             return picture
         image_id = data.get("productBigImageAccessId")
         return self.build_file_download_url(image_id)
+
+    @staticmethod
+    def normalize_external_url(url: Optional[str], default_host: str = "https://www.lcsc.com") -> str:
+        """Normalize URL-like text to an absolute HTTPS URL where possible."""
+        text = str(url or "").strip()
+        if not text:
+            return ""
+        text = text.replace("\\", "/")
+        text = re.sub(r"^([a-zA-Z][a-zA-Z0-9+.-]*)//", r"\1://", text)
+        if text.startswith("//"):
+            return "https:" + text
+        if text.startswith("/"):
+            return default_host.rstrip("/") + text
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", text):
+            return text
+        if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}([/:]|$)", text):
+            return "https://" + text
+        return text
+
+    def extract_lcsc_product_url(self, url: Optional[str]) -> str:
+        """Extract canonical LCSC product URL from malformed URL-like text."""
+        text = str(url or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        lower = text.lower()
+        if "lcsc" not in lower and "product-detail" not in lower:
+            return ""
+
+        # Handles full and malformed forms like:
+        # https://lcsc.comhttps//lcsc.com/product-detail/..._C123456.html/?href=...
+        match = re.search(
+            r"(?:https?:?//)?(?:www\.)?lcsc\.com/(product-detail/[^?#\s]*?\.html)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(
+                r"(product-detail/[^?#\s]*?\.html)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        if match:
+            path = match.group(1).lstrip("/").rstrip("/")
+            return f"{self.LCSC_SEARCH_BASE.rsplit('/', 1)[0]}/{path}"
+
+        code_match = re.search(r"\b(C\d{4,})\b", text, flags=re.IGNORECASE)
+        if code_match:
+            return f"{self.LCSC_PRODUCT_BASE}/{code_match.group(1).upper()}.html"
+        return ""
+
+    def build_lcsc_search_url(self, lcsc_number: str) -> str:
+        code = str(lcsc_number or "").strip()
+        if not code:
+            return self.LCSC_SEARCH_BASE
+        if re.fullmatch(r"C\d{4,}", code, flags=re.IGNORECASE):
+            return f"{self.LCSC_PRODUCT_BASE}/{code.upper()}.html"
+        return f"{self.LCSC_SEARCH_BASE}?q={quote_plus(code)}"
+
+    def resolve_part_page_url(self, data: Optional[dict], lcsc_number: Optional[str] = None) -> str:
+        """Resolve best available LCSC page URL with robust fallback by code."""
+        info = data or {}
+        code = str(lcsc_number or info.get("componentCode") or "").strip()
+        if re.fullmatch(r"C\d{4,}", code, flags=re.IGNORECASE):
+            return f"{self.LCSC_PRODUCT_BASE}/{code.upper()}.html"
+
+        for key in (
+            "lcscGoodsUrl",
+            "goodsUrl",
+            "productUrl",
+            "productDetailUrl",
+            "componentUrl",
+            "url",
+        ):
+            raw = info.get(key)
+            canonical = self.extract_lcsc_product_url(raw)
+            if canonical:
+                return canonical
+            candidate = self.normalize_external_url(raw)
+            canonical = self.extract_lcsc_product_url(candidate)
+            if canonical:
+                return canonical
+            if candidate:
+                return candidate
+
+        if code:
+            return self.build_lcsc_search_url(code)
+        return self.LCSC_SEARCH_BASE
+
+    def resolve_datasheet_url(self, data: Optional[dict]) -> str:
+        """Resolve datasheet URL and normalize it."""
+        info = data or {}
+        for key in ("dataManualUrl", "manualUrl", "datasheetUrl", "dataSheetUrl"):
+            candidate = self.normalize_external_url(info.get(key))
+            if candidate:
+                return candidate
+        return ""

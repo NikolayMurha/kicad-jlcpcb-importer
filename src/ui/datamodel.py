@@ -397,6 +397,13 @@ class PartSelectorDataModel(dv.PyDataViewModel):
         except Exception:
             return ""
 
+    def get_package(self, item):
+        """Get the package/case text."""
+        try:
+            return self.ItemToObject(item)[self.columns["PACKAGE_COL"]]
+        except Exception:
+            return ""
+
     def get_manufacturer(self, item):
         """Get the manufacturer name."""
         try:
