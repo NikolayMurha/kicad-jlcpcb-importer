@@ -800,6 +800,21 @@ class SettingsDialog(wx.Dialog):
         lib_path_row.Add(self._lib_path_browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
         gen_box.Add(lib_path_row, 0, wx.ALL | wx.EXPAND, 5)
 
+        self.kicad_symbol_matching_enabled_ctrl = wx.CheckBox(
+            self,
+            wx.ID_ANY,
+            "Enable KiCad built-in matching",
+            name="general_kicad_symbol_matching_enabled",
+        )
+        self.kicad_symbol_matching_enabled_ctrl.SetToolTip(
+            wx.ToolTip(
+                "Enable KiCad built-in symbol/footprint matching before EasyEDA conversion. "
+                "When disabled, all KiCad matching is skipped and importer uses EasyEDA conversion only."
+            )
+        )
+        self.kicad_symbol_matching_enabled_ctrl.Bind(wx.EVT_CHECKBOX, self.update_settings)
+        gen_box.Add(self.kicad_symbol_matching_enabled_ctrl, 0, wx.ALL | wx.EXPAND, 5)
+
         maintenance_row = wx.BoxSizer(wx.HORIZONTAL)
         self._mapping_index_btn = wx.Button(self, wx.ID_ANY, "Mapping & Indexing Settings")
         self._mapping_index_btn.SetToolTip(
@@ -827,6 +842,9 @@ class SettingsDialog(wx.Dialog):
             resolve_library_base_name(general, project_path=Path(self.parent.project_path))
         )
         self.update_lib_format(general.get("lib_format", "easyeda_pro"))
+        self.update_kicad_symbol_matching_enabled(
+            self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
+        )
         self.update_lib_path(self._resolve_lib_path_setting(general))
 
     def _resolve_lib_path_setting(self, general: dict) -> str:
@@ -1026,6 +1044,18 @@ class SettingsDialog(wx.Dialog):
             self.lib_format_ctrl.SetSelection(idx)
         except Exception:
             pass
+
+    def update_kicad_symbol_matching_enabled(self, value):
+        enabled = self._as_bool(value, default=False)
+        try:
+            self.kicad_symbol_matching_enabled_ctrl.SetValue(enabled)
+        except Exception:
+            pass
+        try:
+            self._mapping_index_btn.Enable(enabled)
+        except Exception:
+            pass
+
     def update_lib_path(self, value: str):
         try:
             self.lib_path_ctrl.ChangeValue(str(value) if value is not None else "")
@@ -1091,6 +1121,8 @@ class SettingsDialog(wx.Dialog):
         dlg = None
         try:
             general = (self.parent.settings.get("general", {}) or {})
+            if not self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
+                return
             dlg = MappingIndexSettingsDialog(self.parent, general)
             if dlg.ShowModal() != wx.ID_OK:
                 return

@@ -434,6 +434,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             return
         if not self._as_bool(general.get("kicad_builtin_first"), default=True):
             return
+        if not self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
+            return
         if self._symbol_index_warmup_running:
             if force:
                 self.log("KiCad builtin: symbol index warmup is already running.\n")
@@ -871,6 +873,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         if e.section == "general" and e.setting in (
             "lib_format",
             "kicad_builtin_first",
+            "kicad_symbol_matching_enabled",
             "kicad_symbol_index_ttl_sec",
             "kicad_symbol_index_max_libs",
         ):

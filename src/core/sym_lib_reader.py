@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .helpers import strip_lcsc_suffix
 
@@ -277,6 +277,12 @@ def _list_symbols_from_content(content: str) -> List[Tuple[str, str]]:
     return results
 
 
+_LCSC_PROP_RE = re.compile(
+    r'\(property\s+"(?:LCSC\s*Part(?:\s*#)?|Supplier\s*Part(?:\s*#)?|LCSC|Component\s*Code)"\s+"(C\d{4,})"\s',
+    re.IGNORECASE,
+)
+
+
 def _list_symbols_meta_from_content(content: str) -> List[Tuple[str, str, str]]:
     results: List[Tuple[str, str, str]] = []
     depth = 0
@@ -310,6 +316,53 @@ def _list_symbols_meta_from_content(content: str) -> List[Tuple[str, str, str]]:
             depth -= 1
         i += 1
     return results
+
+
+def _list_symbols_lcsc_from_content(content: str) -> List[Tuple[str, str]]:
+    """Return (symbol_name, lcsc_id) for every top-level symbol that carries
+    a recognised LCSC Part property (value must match ``C\\d+``)."""
+    results: List[Tuple[str, str]] = []
+    depth = 0
+    i = 0
+    length = len(content)
+    while i < length:
+        c = content[i]
+        if c == "(":
+            depth += 1
+            if depth == 2:
+                m = re.match(r'\(symbol\s+"([^"]+)"', content[i:])
+                if m:
+                    name = m.group(1)
+                    start = i
+                    bd = 0
+                    j = i
+                    while j < length:
+                        if content[j] == "(":
+                            bd += 1
+                        elif content[j] == ")":
+                            bd -= 1
+                            if bd == 0:
+                                block = content[start : j + 1]
+                                lm = _LCSC_PROP_RE.search(block)
+                                if lm:
+                                    results.append((name, lm.group(1).upper()))
+                                i = j - 1
+                                break
+                        j += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    return results
+
+
+def list_symbols_kicad_lcsc_ids(lib_path: Path) -> List[Tuple[str, str]]:
+    """Return ``(symbol_name, lcsc_id)`` pairs for symbols in a ``.kicad_sym``
+    file that have a recognised LCSC Part property."""
+    try:
+        content = lib_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    return _list_symbols_lcsc_from_content(content)
 
 
 def extract_symbol_block(lib_path: Path, symbol_name: str) -> Optional[str]:
@@ -457,6 +510,142 @@ def _property_block_span(text: str, prop_name: str) -> Optional[Tuple[int, int]]
     return None
 
 
+def normalize_pin_names(symbol_block: str) -> str:
+    """Replace legacy KiCad 5 tilde pin names with empty strings.
+
+    kicad-cli (and EasyEDA exports) use ``(name "~")`` to denote a pin
+    without a visible name — the KiCad 5 convention.  KiCad 6+ renders
+    ``~`` literally on the schematic canvas.  Replace every such occurrence
+    inside a ``(pin ...)`` block with ``(name "")``.
+    """
+    return re.sub(
+        r'(\(pin\b[^(]*(?:\([^)]*\)[^(]*)*?\(name\s+)"~"',
+        r'\1""',
+        symbol_block,
+        flags=re.DOTALL,
+    )
+
+
+def _find_pin_block_spans(symbol_block: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    idx = 0
+    n = len(symbol_block)
+    while True:
+        start = symbol_block.find("(pin ", idx)
+        if start == -1:
+            break
+        depth = 0
+        i = start
+        end = -1
+        while i < n:
+            ch = symbol_block[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+            i += 1
+        if end == -1:
+            idx = start + 1
+            continue
+        spans.append((start, end))
+        idx = end
+    return spans
+
+
+def _normalize_pin_number_token(value: str) -> str:
+    token = str(value or "").strip().upper()
+    if not token:
+        return ""
+    token = token.strip("()[]{}")
+    token = re.sub(r"\s+", "", token)
+    token = token.replace('"', "").replace("'", "")
+    return token
+
+
+def _sanitize_pin_label(value: str) -> str:
+    text = str(value or "").replace('"', "'").strip()
+    text = re.sub(r"\s+", " ", text)
+    if text == "~":
+        return ""
+    return text
+
+
+def apply_pin_name_map(
+    symbol_block: str,
+    pin_name_map: Dict[str, str],
+) -> Tuple[str, int, int, int]:
+    """Patch symbol pin labels by pin number.
+
+    Returns tuple:
+      (patched_block, renamed_count, matched_count, total_pins)
+    """
+    if not symbol_block or not pin_name_map:
+        return symbol_block, 0, 0, 0
+
+    normalized_map: Dict[str, str] = {}
+    for raw_num, raw_name in (pin_name_map or {}).items():
+        num = _normalize_pin_number_token(raw_num)
+        if not num:
+            continue
+        normalized_map[num] = _sanitize_pin_label(raw_name)
+    if not normalized_map:
+        return symbol_block, 0, 0, 0
+
+    parts: List[str] = []
+    prev = 0
+    renamed = 0
+    matched = 0
+    pin_total = 0
+
+    number_re = re.compile(r'(\(number(?:\s+|\s*\n\s*)")([^"]+)(")', re.MULTILINE)
+    name_re = re.compile(r'(\(name(?:\s+|\s*\n\s*)")([^"]*)(")', re.MULTILINE)
+
+    for s, e in _find_pin_block_spans(symbol_block):
+        parts.append(symbol_block[prev:s])
+        pin_block = symbol_block[s:e]
+        pin_total += 1
+
+        m_num = number_re.search(pin_block)
+        m_name = name_re.search(pin_block)
+        if not m_num or not m_name:
+            parts.append(pin_block)
+            prev = e
+            continue
+
+        number_raw = str(m_num.group(2) or "").strip()
+        number_norm = _normalize_pin_number_token(number_raw)
+        target_name = normalized_map.get(number_norm)
+        if target_name is None and number_raw in normalized_map:
+            target_name = normalized_map[number_raw]
+
+        if target_name is None:
+            parts.append(pin_block)
+            prev = e
+            continue
+
+        matched += 1
+        current_name = str(m_name.group(2) or "")
+        if current_name == target_name:
+            parts.append(pin_block)
+            prev = e
+            continue
+
+        pin_block = (
+            pin_block[: m_name.start(2)]
+            + target_name
+            + pin_block[m_name.end(2) :]
+        )
+        renamed += 1
+        parts.append(pin_block)
+        prev = e
+
+    parts.append(symbol_block[prev:])
+    return "".join(parts), renamed, matched, pin_total
+
+
 def ensure_value_visible_in_symbol(symbol_block: str) -> str:
     """Remove ``(hide yes)`` from the Value property so it shows in the schematic."""
     span = _property_block_span(symbol_block, "Value")
@@ -499,6 +688,81 @@ def hide_value_in_footprint(content: str) -> str:
         indent = re.match(r"[\t ]*", prop[line_start + 1 :]).group() if line_start >= 0 else "\t\t"
         prop = prop[:-1] + f"\n{indent}(effects\n{indent}    (hide yes)\n{indent})"
     return content[:s] + prop + content[e:]
+
+
+def set_footprint_meta_property(
+    content: str,
+    prop_name: str,
+    prop_value: str,
+    layer: str = "Cmts.User",
+) -> str:
+    """Set or insert a custom property in .kicad_mod content."""
+    name = str(prop_name or "").strip()
+    value = str(prop_value or "").strip()
+    if not name or not value:
+        return content
+    safe_value = value.replace('"', "'")
+    safe_layer = str(layer or "Cmts.User").replace('"', "'")
+
+    pattern = re.compile(rf'(\(property\s+"{re.escape(name)}"\s+")([^"]*)(")')
+    if pattern.search(content):
+        updated = pattern.sub(
+            lambda m: m.group(1) + safe_value + m.group(3),
+            content,
+            count=1,
+        )
+        span = _property_block_span(updated, name)
+        if not span:
+            return updated
+        s, e = span
+        block = updated[s:e]
+        if "(hide yes)" not in block:
+            eff = re.search(r'(?m)^([ \t]+)\(effects\b', block)
+            if eff:
+                indent = eff.group(1)
+                block = block[: eff.start()] + f"{indent}(hide yes)\n" + block[eff.start() :]
+            else:
+                close = re.search(r'(?m)^([ \t]*)\)\s*$', block)
+                if close:
+                    indent = close.group(1) + ("  ")
+                    block = block[: close.start()] + f"\n{indent}(hide yes)" + block[close.start() :]
+        return updated[:s] + block + updated[e:]
+
+    prop_indent_match = re.search(r'(?m)^([ \t]+)\(property\s+"[^"]+"', content)
+    prop_indent = prop_indent_match.group(1) if prop_indent_match else "\t"
+    step = "\t" if "\t" in prop_indent else "  "
+    child_indent = prop_indent + step
+    grand_indent = child_indent + step
+    great_indent = grand_indent + step
+
+    prop_block = (
+        f'{prop_indent}(property "{name}" "{safe_value}"\n'
+        f"{child_indent}(at 0 0 0)\n"
+        f'{child_indent}(layer "{safe_layer}")\n'
+        f"{child_indent}(hide yes)\n"
+        f"{child_indent}(effects\n"
+        f"{grand_indent}(font\n"
+        f"{great_indent}(size 1 1)\n"
+        f"{great_indent}(thickness 0.15)\n"
+        f"{grand_indent})\n"
+        f"{child_indent})\n"
+        f"{prop_indent})\n"
+    )
+
+    insert = re.search(
+        r'(?m)^[ \t]+\((?:attr|fp_(?:text|line|rect|poly|circle|arc)|pad|model)\b',
+        content,
+    )
+    if insert:
+        at = insert.start()
+        prefix = "" if at <= 0 or content[:at].endswith("\n") else "\n"
+        return content[:at] + prefix + prop_block + content[at:]
+
+    end = content.rfind(")")
+    if end >= 0:
+        prefix = "" if end <= 0 or content[:end].endswith("\n") else "\n"
+        return content[:end] + prefix + prop_block + content[end:]
+    return content + "\n" + prop_block
 
 
 def patch_footprint_property(symbol_content: str, new_lib_name: str) -> str:
@@ -565,9 +829,56 @@ def ensure_kicad_sym_lib(path: Path) -> None:
         path.write_text(_KICAD_SYM_HEADER, encoding="utf-8")
 
 
+def remove_symbol_properties(symbol_block: str, names: List[str]) -> str:
+    """Remove named KiCad symbol properties from a complete ``(symbol ...)`` block."""
+    result = symbol_block
+    for name in names or []:
+        prop_name = str(name or "").strip()
+        if not prop_name:
+            continue
+        while True:
+            span = _property_block_span(result, prop_name)
+            if not span:
+                break
+            start, end = span
+            line_start = result.rfind("\n", 0, start) + 1
+            if result[line_start:start].strip() == "":
+                start = line_start
+            while end < len(result) and result[end] in " \t":
+                end += 1
+            if end < len(result) and result[end] == "\n":
+                end += 1
+            result = result[:start] + result[end:]
+    return result
+
+
+def _get_symbol_property_value(symbol_block: str, name: str) -> Optional[str]:
+    match = re.search(rf'\(property\s+"{re.escape(name)}"\s+"([^"]*)"', symbol_block)
+    return match.group(1) if match else None
+
+
+def _set_symbol_property_value(symbol_block: str, name: str, value: str) -> str:
+    safe_value = str(value or "").replace('"', "'")
+    return re.sub(
+        rf'(\(property\s+"{re.escape(name)}"\s+")([^"]*)(")',
+        lambda m: m.group(1) + safe_value + m.group(3),
+        symbol_block,
+        count=1,
+    )
+
+
+def apply_designator_to_reference(symbol_block: str) -> str:
+    """Copy Designator value to Reference, then remove the duplicate property."""
+    designator = (_get_symbol_property_value(symbol_block, "Designator") or "").strip()
+    if designator:
+        symbol_block = _set_symbol_property_value(symbol_block, "Reference", designator)
+    return remove_symbol_properties(symbol_block, ["Designator"])
+
+
 def add_or_replace_symbol(lib_path: Path, symbol_name: str, symbol_block: str) -> None:
     """Add or replace symbol block in destination .kicad_sym file."""
     ensure_kicad_sym_lib(lib_path)
+    symbol_block = apply_designator_to_reference(symbol_block)
     content = lib_path.read_text(encoding="utf-8")
     existing = _extract_from_content(content, symbol_name)
     if existing:

@@ -40,8 +40,8 @@ def _require_requests():
 MODELS_DIR = "3dmodels"
 
 
-def _patch_esym_visibility(data_str: str) -> str:
-    """Make the 'Symbol' (Value) ATTR visible in an .esym JSONL file.
+def _patch_esym_attrs(data_str: str, symbol_value: str = "") -> str:
+    """Normalize value-related ATTR records in an .esym JSONL file.
 
     EasyEDA Pro symbols store per-attribute visibility as a boolean at index 5:
         ["ATTR", id, parent, name, value, visible, editable, ...]
@@ -57,17 +57,27 @@ def _patch_esym_visibility(data_str: str) -> str:
                 record = json.loads(stripped)
                 if (
                     isinstance(record, list)
-                    and len(record) >= 6
                     and record[0] == "ATTR"
-                    and record[3] == "Symbol"
-                    and record[5] is False
+                    and len(record) >= 4
                 ):
-                    record[5] = True
-                    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                    if record[3] == "Symbol" and len(record) >= 6:
+                        val = str(record[4] or "").strip()
+                        clean = strip_lcsc_suffix(val)
+                        if clean and clean != val:
+                            record[4] = clean
+                        elif symbol_value and (not val or val == "~"):
+                            record[4] = symbol_value
+                        record[5] = True
+                        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
             except Exception:
                 pass
         result.append(line)
     return "\n".join(result)
+
+
+def _patch_esym_visibility(data_str: str) -> str:
+    """Backward-compatible wrapper for older call sites."""
+    return _patch_esym_attrs(data_str)
 
 
 # UUID strings can be in the format <uuid>|<owner_uuid>. This function gets the <uuid> part
@@ -283,42 +293,9 @@ class ComponentLoader():
         for s_uuid, s_data in fetched_symbols.items():
             ds = extractDataStr(s_data, debug_log=self.debug_log)
             if ds:
-                # Patch Symbol ATTR name (strip LCSC suffix) and visibility.
-                # .esym uses JSONL format (one JSON array per line), so we
-                # patch it line-by-line rather than with json.loads on the whole string.
-                dev_name = sym_uuid_to_name.get(s_uuid, "")
-                patched_lines = []
-                for line in ds.split("\n"):
-                    stripped = line.strip()
-                    if (stripped
-                            and '"ATTR"' in stripped
-                            and '"Symbol"' in stripped):
-                        try:
-                            record = json.loads(stripped)
-                            if (
-                                isinstance(record, list)
-                                and len(record) >= 6
-                                and record[0] == "ATTR"
-                                and record[3] == "Symbol"
-                            ):
-                                # Strip LCSC suffix from value (index 4)
-                                val = str(record[4] or "").strip()
-                                clean = strip_lcsc_suffix(val)
-                                if clean and clean != val:
-                                    record[4] = clean
-                                elif dev_name and (not val or val == "~"):
-                                    record[4] = dev_name
-                                # Ensure visible (index 5)
-                                record[5] = True
-                                line = json.dumps(
-                                    record,
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                        except Exception:
-                            pass
-                    patched_lines.append(line)
-                ds = "\n".join(patched_lines)
+                # .esym uses JSONL format (one JSON array per line), so patch
+                # ATTR records line-by-line rather than parsing the whole file.
+                ds = _patch_esym_attrs(ds, sym_uuid_to_name.get(s_uuid, ""))
                 symbol_data_str[s_uuid] = ds
 
             s_data.pop("dataStr", None) # Remove the dataStr field if exists
@@ -355,7 +332,7 @@ class ComponentLoader():
                         if name.endswith('.esym'):
                             symbol_uuid = os.path.splitext(os.path.basename(name))[0]
                             if symbol_uuid not in symbol_data_str:
-                                symbol_data_str[symbol_uuid] = _patch_esym_visibility(
+                                symbol_data_str[symbol_uuid] = _patch_esym_attrs(
                                     old_zip.read(name).decode("utf-8")
                                 )
                         elif name.endswith('.efoo'):

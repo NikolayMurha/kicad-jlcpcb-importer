@@ -23,17 +23,21 @@ from ...core.elibz_native import (
     resolve_footprint_mod_path,
 )
 from ...core.sym_lib_reader import (
+    apply_pin_name_map,
     add_or_replace_symbol,
     ensure_value_visible_in_symbol,
     extract_parent_symbol_chain,
     extract_symbol_block,
     fix_symbol_label_positions,
+    normalize_pin_names,
     get_connected_fp_libs,
     get_connected_sym_libs,
     get_footprint_property,
     hide_value_in_footprint,
+    list_symbols_kicad_lcsc_ids,
     list_symbols_kicad_meta,
     patch_footprint_property,
+    set_footprint_meta_property,
     set_footprint_property,
 )
 from ...core.events import LogboxAppendEvent
@@ -63,6 +67,103 @@ class KicadImporter:
     _DEFAULT_FP_LIB_PRIORITY = footprint_matcher.DEFAULT_FP_LIB_PRIORITY
     _SOURCE_SYMBOL_PROP = "JLCPCB Source Symbol"
     _SOURCE_FOOTPRINT_PROP = "JLCPCB Source Footprint"
+    _SYMBOL_ATTR_DROP_KEYS = {
+        "3dmodel",
+        "3dmodeltitle",
+        "3dmodeltransform",
+        "supplierfootprint",
+        "symbol",
+        "symbolid",
+        "symboluuid",
+        "footprintid",
+        "footprintuuid",
+    }
+    _SYMBOL_PURGE_PROPS = (
+        "3D Model",
+        "3D Model Title",
+        "3D Model Transform",
+        "Supplier Footprint",
+        "Symbol",
+        "Symbol UUID",
+        "Footprint UUID",
+        "LCSC Description",
+        "Part Description",
+    )
+    _DB_CANON_KEYS = (
+        "LCSC Part",
+        "MFR.Part",
+        "Package",
+        "Manufacturer",
+        "Description",
+        "First Category",
+        "Second Category",
+        "Datasheet",
+        "Library Type",
+    )
+    _DB_CANON_ALIASES = {
+        "LCSC Part": (
+            "LCSC Part",
+            "Supplier Part",
+            "Supplier Part #",
+            "LCSC Part #",
+            "LCSC",
+            "Component Code",
+        ),
+        "MFR.Part": (
+            "MFR.Part",
+            "Manufacturer Part",
+            "MPN",
+            "Part Number",
+            "PartNumber",
+            "Part No",
+            "Device",
+            "Name",
+        ),
+        "Package": (
+            "Package",
+            "Supplier Footprint",
+            "Footprint",
+            "Case",
+            "Encapsulation",
+            "Housing",
+            "Outline",
+        ),
+        "Manufacturer": (
+            "Manufacturer",
+            "Mfr",
+            "Vendor",
+            "Brand",
+        ),
+        "Description": (
+            "Description",
+            "LCSC Description",
+            "Part Description",
+            "LCSC Part Name",
+            "ki_description",
+        ),
+        "First Category": (
+            "First Category",
+            "Primary Category",
+            "Category",
+            "Parent Tag",
+        ),
+        "Second Category": (
+            "Second Category",
+            "Secondary Category",
+            "Subcategory",
+            "Child Tag",
+        ),
+        "Datasheet": (
+            "Datasheet",
+            "Datasheet URL",
+            "Data Sheet",
+        ),
+        "Library Type": (
+            "Library Type",
+            "Library",
+            "Component Library",
+        ),
+    }
 
     def __init__(
         self,
@@ -79,6 +180,8 @@ class KicadImporter:
         self.lib_dir = Path(lib_dir) if lib_dir is not None else None
         self._symbol_index_cache_key: str = ""
         self._symbol_index_cache: Dict[str, Tuple[str, Path]] = {}
+        self._lcsc_symbol_index_cache: Dict[str, Tuple[str, Path]] = {}
+        self._easyeda_pin_map_cache: Dict[str, Dict[str, str]] = {}
 
     def import_part(self, lcsc_id: str) -> Tuple[bool, Path]:
         return self._import_part_via_elibz(lcsc_id)
@@ -197,6 +300,8 @@ class KicadImporter:
             return False
         if not self._kicad_builtin_first_enabled(general):
             return False
+        if not self._kicad_symbol_matching_enabled(general):
+            return False
         sym_libs = self._exclude_project_local_libs(
             get_connected_sym_libs(
                 self.project_path,
@@ -240,6 +345,122 @@ class KicadImporter:
         except Exception:
             return default
 
+    @staticmethod
+    def _normalize_pin_number_key(value: str) -> str:
+        token = str(value or "").strip().upper()
+        if not token:
+            return ""
+        token = token.strip("()[]{}")
+        token = re.sub(r"\s+", "", token)
+        token = token.replace('"', "").replace("'", "")
+        return token
+
+    @staticmethod
+    def _sanitize_pin_label(value: str) -> str:
+        text = str(value or "").replace('"', "'").strip()
+        text = re.sub(r"\s+", " ", text)
+        if text == "~":
+            return ""
+        return text
+
+    @classmethod
+    def _parse_easyeda_symbol_pin_map_data(cls, data_str: str) -> Dict[str, str]:
+        pin_map: Dict[str, str] = {}
+        if not data_str:
+            return pin_map
+
+        pin_nodes: set[str] = set()
+        pin_attrs: Dict[str, Dict[str, str]] = {}
+
+        for line in str(data_str).splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                rec = json.loads(s)
+            except Exception:
+                continue
+            if not isinstance(rec, list) or not rec:
+                continue
+            kind = str(rec[0] or "").upper()
+            if kind == "PIN" and len(rec) >= 2:
+                pin_id = str(rec[1] or "").strip()
+                if pin_id:
+                    pin_nodes.add(pin_id)
+                continue
+            if kind == "ATTR" and len(rec) >= 5:
+                parent = str(rec[2] or "").strip()
+                key = str(rec[3] or "").strip().upper()
+                val = str(rec[4] or "").strip()
+                if not parent or parent not in pin_nodes:
+                    continue
+                if key not in {"NAME", "NUMBER"}:
+                    continue
+                node = pin_attrs.setdefault(parent, {})
+                node[key] = val
+
+        for attrs in pin_attrs.values():
+            raw_num = str(attrs.get("NUMBER") or "").strip()
+            raw_name = cls._sanitize_pin_label(str(attrs.get("NAME") or ""))
+            if not raw_num:
+                continue
+            num = cls._normalize_pin_number_key(raw_num)
+            if not num:
+                continue
+            pin_map[num] = raw_name
+        return pin_map
+
+    def _fetch_easyeda_pin_map(
+        self,
+        attrs: Dict[str, str],
+        device_entry: Optional[Dict] = None,
+    ) -> Dict[str, str]:
+        symbol_uuid = str(attrs.get("Symbol") or "").strip()
+        if not symbol_uuid and device_entry:
+            symbol_uuid = str(((device_entry.get("symbol") or {}).get("uuid") or "")).strip()
+        symbol_uuid = symbol_uuid.split("|")[0].strip()
+        if not symbol_uuid:
+            return {}
+
+        cached = self._easyeda_pin_map_cache.get(symbol_uuid)
+        if cached is not None:
+            return dict(cached)
+
+        pin_map: Dict[str, str] = {}
+        try:
+            api = LCSC_API()
+            comp_info = api.easyeda_get_component(symbol_uuid)
+            comp = (comp_info or {}).get("result") or {}
+            pin_map = self._parse_easyeda_symbol_pin_map_data(str(comp.get("dataStr") or ""))
+        except Exception as exc:
+            self.log(f"EasyEDA pin-map fetch failed for symbol {symbol_uuid}: {exc}\n")
+            pin_map = {}
+
+        self._easyeda_pin_map_cache[symbol_uuid] = dict(pin_map)
+        return pin_map
+
+    @classmethod
+    def _pin_name_map_from_meta(cls, meta: Dict) -> Dict[str, str]:
+        pin_map_raw = meta.get("easyeda_pin_map")
+        if not isinstance(pin_map_raw, dict):
+            raw_json = str(meta.get("easyeda_pin_map_json") or "").strip()
+            if raw_json:
+                try:
+                    parsed = json.loads(raw_json)
+                    pin_map_raw = parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    pin_map_raw = {}
+            else:
+                pin_map_raw = {}
+
+        out: Dict[str, str] = {}
+        for raw_num, raw_name in (pin_map_raw or {}).items():
+            num = cls._normalize_pin_number_key(raw_num)
+            if not num:
+                continue
+            out[num] = cls._sanitize_pin_label(raw_name)
+        return out
+
     def _symbol_index_cache_path(self) -> Path:
         return Path(PLUGIN_PATH) / "cache" / "kicad_symbol_index_v1.json"
 
@@ -278,6 +499,9 @@ class KicadImporter:
 
     def _kicad_builtin_first_enabled(self, general: Dict) -> bool:
         return self._as_bool(general.get("kicad_builtin_first"), default=True)
+
+    def _kicad_symbol_matching_enabled(self, general: Dict) -> bool:
+        return self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
 
     @staticmethod
     def _component_kind(
@@ -371,11 +595,74 @@ class KicadImporter:
         general: Dict,
         sym_libs: List[Tuple[str, Path]],
     ) -> Optional[Tuple[str, str, bool, Path]]:
-        attrs = self._parse_attributes_map(str(meta.get("attributes_json") or ""))
+        def _clip(value: object, limit: int = 96) -> str:
+            text = str(value or "").strip()
+            if len(text) > limit:
+                return text[: limit - 3] + "..."
+            return text
+
+        def _collect_pairs(keys: List[str], source: Dict[str, str]) -> List[str]:
+            out: List[str] = []
+            for key in keys:
+                val = str(source.get(key) or "").strip()
+                if val:
+                    out.append(f"{key}='{_clip(val)}'")
+            return out
+
+        attrs = self._canonicalize_easyeda_attrs_for_db(
+            self._parse_attributes_map(str(meta.get("attributes_json") or "")),
+            meta=meta,
+        )
         max_symbol_libs = max(20, self._as_int(general.get("kicad_symbol_index_max_libs"), 300))
         symbol_index = self._get_symbol_index(sym_libs, general, max_libs=max_symbol_libs)
         wildcard_min_score = max(0, self._as_int(general.get("kicad_symbol_wildcard_min_score"), 80))
         wildcard_min_gap = max(0, self._as_int(general.get("kicad_symbol_wildcard_min_gap"), 14))
+        ref_hint_raw = str(meta.get("reference_prefix") or attrs.get("Reference") or "").strip()
+        value_hint_raw = str(meta.get("value") or attrs.get("Value") or "").strip()
+        self.log(
+            "KiCad builtin: symbol search params: "
+            f"kind={component_kind}, "
+            f"ref_hint='{_clip(ref_hint_raw)}', "
+            f"value_hint='{_clip(value_hint_raw)}', "
+            f"index_size={len(symbol_index)}, "
+            f"wildcard_min_score={wildcard_min_score}, "
+            f"wildcard_min_gap={wildcard_min_gap}\n"
+        )
+
+        meta_pairs = _collect_pairs(["mfr_part", "part_no", "mpn", "symbol_name"], meta)
+        attr_pairs = _collect_pairs(
+            [
+                "Manufacturer Part",
+                "MFR.Part",
+                "MPN",
+                "Part Number",
+                "PartNumber",
+                "Part No",
+                "Device",
+                "Name",
+                "Symbol",
+                "symbol",
+                "Schematic Symbol",
+                "KiCad Symbol",
+            ],
+            attrs,
+        )
+        if meta_pairs:
+            self.log("KiCad builtin: symbol meta hints: " + ", ".join(meta_pairs[:10]) + "\n")
+        if attr_pairs:
+            self.log("KiCad builtin: symbol attr hints: " + ", ".join(attr_pairs[:14]) + "\n")
+
+        # 0) LCSC-ID lookup: if a symbol in a connected library already carries
+        #    this exact LCSC Part property, reuse it immediately.
+        lcsc_id = str(attrs.get("LCSC Part") or meta.get("lcsc") or "").strip().upper()
+        if lcsc_id and lcsc_id.startswith("C") and lcsc_id[1:].isdigit():
+            hit = self._lcsc_symbol_index_cache.get(lcsc_id)
+            if hit:
+                name, lib_path = hit
+                blk = extract_symbol_block(lib_path, name)
+                if blk:
+                    self.log(f"KiCad builtin: found symbol by LCSC ID {lcsc_id} → {name}\n")
+                    return name, blk, True, lib_path
 
         # 1) Exact part-number style lookup (preferred):
         # if KiCad already has a dedicated symbol (e.g. IR4321), use that first.
@@ -527,6 +814,23 @@ class KicadImporter:
                 return alias
         return ""
 
+    @staticmethod
+    def _build_lcsc_index(
+        sym_libs: List[Tuple[str, Path]],
+    ) -> Dict[str, Tuple[str, Path]]:
+        """Scan libraries for symbols that carry an LCSC Part property.
+        Returns ``{lcsc_id_upper: (symbol_name, lib_path)}``."""
+        lcsc_index: Dict[str, Tuple[str, Path]] = {}
+        for _alias, lib_path in sym_libs:
+            try:
+                for name, lcsc_id in list_symbols_kicad_lcsc_ids(lib_path):
+                    k = lcsc_id.upper()
+                    if k not in lcsc_index:
+                        lcsc_index[k] = (name, lib_path)
+            except Exception:
+                continue
+        return lcsc_index
+
     def _get_symbol_index(
         self,
         sym_libs: List[Tuple[str, Path]],
@@ -565,11 +869,13 @@ class KicadImporter:
         if disk_index is not None:
             self._symbol_index_cache_key = signature_hash
             self._symbol_index_cache = disk_index
+            self._lcsc_symbol_index_cache = self._build_lcsc_index(scan_libs)
             self.log("KiCad builtin: loaded symbol index from disk cache.\n")
             _report(100)
             return disk_index
 
         index: Dict[str, Tuple[str, Path]] = {}
+        lcsc_index: Dict[str, Tuple[str, Path]] = {}
         start_logged = False
         for idx, (_alias, lib_path) in enumerate(scan_libs, start=1):
             if not start_logged:
@@ -580,6 +886,10 @@ class KicadImporter:
                     k = name.lower()
                     if k not in index:
                         index[k] = (name, lib_path)
+                for name, lcsc_id in list_symbols_kicad_lcsc_ids(lib_path):
+                    k = lcsc_id.upper()
+                    if k not in lcsc_index:
+                        lcsc_index[k] = (name, lib_path)
             except Exception:
                 continue
             _report(int(idx * 100 / max(1, len(scan_libs))))
@@ -595,6 +905,9 @@ class KicadImporter:
         )
         self._symbol_index_cache_key = signature_hash
         self._symbol_index_cache = index
+        self._lcsc_symbol_index_cache = lcsc_index
+        if lcsc_index:
+            self.log(f"KiCad builtin: LCSC symbol index ready ({len(lcsc_index)} entries).\n")
         self.log(f"KiCad builtin: symbol index ready ({len(index)} unique symbols).\n")
         _report(100)
         return index
@@ -745,6 +1058,10 @@ class KicadImporter:
     @staticmethod
     def _score_fp_name(mod_name: str, package_candidates: List[str]) -> int:
         return footprint_matcher.score_fp_name(mod_name, package_candidates)
+
+    @staticmethod
+    def _explicit_fp_ref_bonus(mod_name: str, explicit_refs: List[str]) -> int:
+        return footprint_matcher.explicit_fp_ref_bonus(mod_name, explicit_refs)
 
     @staticmethod
     def _remember_fp_candidate(
@@ -937,6 +1254,7 @@ class KicadImporter:
                     ):
                         continue
                     strict_score = self._score_fp_name(mod.stem, package_candidates) + 1200
+                    strict_score += self._explicit_fp_ref_bonus(mod.stem, refs_to_try)
                     strict_score += self._dimension_match_adjustment(mod.stem, package_dims, strict=True)
                     self._remember_fp_candidate(strict_pkgpin_candidates, alias, mod.stem, strict_score)
                     stem_key = mod.stem.upper()
@@ -988,8 +1306,6 @@ class KicadImporter:
             strict_best: Optional[Tuple[str, Path]] = None
             for alias, pretty in fuzzy_libs:
                 alias_up = alias.upper()
-                if "THT" in alias_up:
-                    continue
                 try:
                     mods = pretty.glob("*.kicad_mod")
                 except Exception:
@@ -1000,20 +1316,17 @@ class KicadImporter:
                     if scanned > max_files_per_lib:
                         break
                     name_up = mod.stem.upper()
-                    if any(tok in name_up for tok in ("AXIAL", "RADIAL", "HORIZONTAL", "VERTICAL")):
-                        continue
                     compact = re.sub(r"[^A-Z0-9]", "", name_up)
                     has_imp = any(code in compact for code in hinted_imperial)
                     has_met = any(code in compact for code in hinted_metric)
                     if not (has_imp or has_met):
                         continue
-                    if (
-                        require_keyword_overlap
-                        and strict_pkg_keywords
-                        and not self._has_strict_keyword_overlap(mod.stem, strict_pkg_keywords)
-                    ):
-                        continue
+                    # Do NOT apply keyword overlap filter here: chip-size tokens
+                    # (1206, 0402 …) are purely numeric so strict_pkg_keywords may
+                    # only contain EasyEDA-specific family tokens ("CAP", "CAPSMD" …)
+                    # that have no match in standard KiCad names like C_1206_3216Metric.
                     strict_score = self._score_fp_name(mod.stem, package_candidates)
+                    strict_score += self._explicit_fp_ref_bonus(mod.stem, refs_to_try)
                     if has_imp:
                         strict_score += 600
                     if has_met:
@@ -1065,6 +1378,7 @@ class KicadImporter:
                 ):
                     continue
                 score = self._score_fp_name(mod.stem, package_candidates)
+                score += self._explicit_fp_ref_bonus(mod.stem, refs_to_try)
                 score += self._chip_size_footprint_adjustment(
                     mod_name=mod.stem,
                     lib_alias=alias,
@@ -1158,10 +1472,17 @@ class KicadImporter:
         self.log(
             f"KiCad builtin: connected symbol libs={len(sym_libs)}, footprint libs={len(fp_libs)}\n"
         )
-        if not sym_libs or not fp_libs:
+        if not fp_libs:
             return None, None, None, None
 
-        symbol_hit = self._pick_symbol_block(component_kind, meta, general, sym_libs)
+        symbol_matching_enabled = self._kicad_symbol_matching_enabled(general)
+        if not symbol_matching_enabled:
+            self.log("KiCad builtin: symbol matching disabled by settings.\n")
+        symbol_hit = (
+            self._pick_symbol_block(component_kind, meta, general, sym_libs)
+            if symbol_matching_enabled and sym_libs
+            else None
+        )
         explicit_fp_refs: List[str] = []
 
         for key in ("Footprint", "footprint", "Package", "package", "Case", "case"):
@@ -1183,7 +1504,10 @@ class KicadImporter:
         symbol_block = ""
         is_exact_symbol = False
         if symbol_hit is None:
-            self.log("KiCad builtin: no symbol match.\n")
+            if symbol_matching_enabled and not sym_libs:
+                self.log("KiCad builtin: no connected symbol libraries, skipping symbol match.\n")
+            elif symbol_matching_enabled:
+                self.log("KiCad builtin: no symbol match.\n")
         else:
             source_symbol_name, symbol_block, is_exact_symbol, source_symbol_lib_path = symbol_hit
             self.log(
@@ -1217,6 +1541,7 @@ class KicadImporter:
         if not same:
             shutil.copy2(source_mod, dest_mod)
         if symbol_hit is None:
+            self._apply_footprint_metadata(dest_mod, source_fp_ref)
             return None, dest_mod, None, source_fp_ref
 
         source_symbol_ref = ""
@@ -1233,6 +1558,25 @@ class KicadImporter:
         symbol_name = self._target_symbol_name(meta, lcsc_id, source_symbol_name)
         symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
         symbol_block = fix_symbol_label_positions(symbol_block)
+        symbol_block = normalize_pin_names(symbol_block)
+        easyeda_pin_map = self._pin_name_map_from_meta(meta)
+        if easyeda_pin_map:
+            patched_block, renamed_cnt, matched_cnt, total_pins = apply_pin_name_map(
+                symbol_block,
+                easyeda_pin_map,
+            )
+            min_required = 2 if total_pins <= 4 else max(3, int(total_pins * 0.5))
+            if total_pins > 0 and matched_cnt >= min_required:
+                symbol_block = patched_block
+                self.log(
+                    "KiCad builtin: pin labels patched from EasyEDA map "
+                    f"({renamed_cnt} renamed, {matched_cnt}/{total_pins} matched by pin number).\n"
+                )
+            elif total_pins > 0:
+                self.log(
+                    "KiCad builtin: EasyEDA pin map coverage is too low, skip pin-label patch "
+                    f"({matched_cnt}/{total_pins}).\n"
+                )
         symbol_block = ensure_value_visible_in_symbol(symbol_block)
         symbol_block = set_footprint_property(symbol_block, f"{lib_name}:{dest_mod.stem}")
         add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
@@ -1243,6 +1587,7 @@ class KicadImporter:
             dest_mod.write_text(content, encoding="utf-8")
         except Exception:
             pass
+        self._apply_footprint_metadata(dest_mod, source_fp_ref)
         if is_exact_symbol:
             self.log(
                 f"KiCad exact symbol match used: '{source_symbol_name}' with footprint '{source_mod.stem}'.\n"
@@ -1303,12 +1648,26 @@ class KicadImporter:
                 # the human-readable LCSC Part Name is in Chinese or uses generic wording.
                 tags_info = device_entry.get("tags") or {}
                 tag_parts = []
+                first_category = ""
+                second_category = ""
                 for tag_key in ("parent_tag", "child_tag"):
                     tag_node = tags_info.get(tag_key) or {}
                     tag_name = str(tag_node.get("name") or "").strip()
                     if tag_name:
                         tag_parts.append(tag_name)
+                    if tag_key == "parent_tag":
+                        first_category = tag_name
+                    elif tag_key == "child_tag":
+                        second_category = tag_name
                 tags_text = " ".join(tag_parts)
+                library_type = ""
+                basic_flag = device_entry.get("is_basic")
+                if basic_flag is None:
+                    basic_flag = device_entry.get("isBasic")
+                if isinstance(basic_flag, bool):
+                    library_type = "Basic" if basic_flag else "Extended"
+                else:
+                    library_type = str(attrs.get("Library Type") or "").strip()
                 description_text = " ".join(filter(None, [
                     str(device_entry.get("description") or "").strip()
                     or str(attrs.get("Description") or "").strip()
@@ -1316,21 +1675,51 @@ class KicadImporter:
                     tags_text,
                 ])).strip()
                 enriched_meta = {
-                    "mfr_part": str(attrs.get("Manufacturer Part") or device_display_name(device_entry) or "").strip(),
-                    "package": str(attrs.get("Supplier Footprint") or "").strip(),
+                    "lcsc_part": str(lcsc_id or "").strip().upper(),
+                    "mfr_part": str(attrs.get("Manufacturer Part") or attrs.get("MFR.Part") or device_display_name(device_entry) or "").strip(),
+                    "package": str(attrs.get("Supplier Footprint") or attrs.get("Package") or "").strip(),
                     "footprint_display": str((device_entry.get("footprint", {}) or {}).get("display_title") or "").strip(),
                     "footprint_title": str((device_entry.get("footprint", {}) or {}).get("title") or "").strip(),
                     "model_title": model_title,
                     "description": description_text,
                     "manufacturer": str(attrs.get("Manufacturer") or "").strip(),
-                    "attributes_json": json.dumps(attrs, ensure_ascii=False),
+                    "first_category": first_category,
+                    "second_category": second_category,
+                    "library_type": library_type,
+                    "datasheet": str(device_entry.get("datasheet") or "").strip(),
                 }
+                attrs = self._canonicalize_easyeda_attrs_for_db(
+                    attrs,
+                    meta=enriched_meta,
+                    lcsc_id=lcsc_id,
+                )
+                easyeda_pin_map = self._fetch_easyeda_pin_map(attrs, device_entry=device_entry)
+                if easyeda_pin_map:
+                    enriched_meta["easyeda_pin_map"] = easyeda_pin_map
+                    enriched_meta["easyeda_pin_map_json"] = json.dumps(easyeda_pin_map, ensure_ascii=False)
+                    self.log(
+                        f"EasyEDA pin-map parsed: {len(easyeda_pin_map)} pins "
+                        f"(symbol={attrs.get('Symbol') or ((device_entry.get('symbol') or {}).get('uuid') or '')}).\n"
+                    )
+                if not enriched_meta["mfr_part"]:
+                    enriched_meta["mfr_part"] = str(attrs.get("MFR.Part") or "").strip()
+                if not enriched_meta["package"]:
+                    enriched_meta["package"] = str(attrs.get("Package") or "").strip()
+                if not enriched_meta["manufacturer"]:
+                    enriched_meta["manufacturer"] = str(attrs.get("Manufacturer") or "").strip()
+                if not enriched_meta["description"]:
+                    enriched_meta["description"] = str(attrs.get("Description") or "").strip()
+                enriched_meta["attributes_json"] = json.dumps(attrs, ensure_ascii=False)
                 symbol_name = enriched_meta["mfr_part"] or lcsc_id
 
                 builtin_fp_path: Optional[Path] = None
                 builtin_symbol_source_ref: Optional[str] = None
                 builtin_fp_source_ref: Optional[str] = None
-                if self._kicad_builtin_first_enabled(general):
+                builtin_matching_enabled = (
+                    self._kicad_builtin_first_enabled(general)
+                    and self._kicad_symbol_matching_enabled(general)
+                )
+                if builtin_matching_enabled:
                     (
                         symbol_name_builtin,
                         builtin_fp_path,
@@ -1380,6 +1769,10 @@ class KicadImporter:
                         )
 
                     self.log("KiCad builtin mapping not found, fallback to EasyEDA conversion.\n")
+                elif self._kicad_builtin_first_enabled(general):
+                    self.log(
+                        "KiCad builtin matching disabled by settings; using EasyEDA conversion only.\n"
+                    )
 
                 # kicad-cli sym/fp upgrade both support .elibz natively (KiCad 9+).
                 # This gives better quality than the v4 API pipeline and already
@@ -1403,12 +1796,14 @@ class KicadImporter:
                     enriched_meta["source_symbol_ref"] = f"EasyEDA:{source_symbol_name}"
                     symbol_block = rename_symbol_block(symbol_block, source_symbol_name, symbol_name)
                     symbol_block = fix_symbol_label_positions(symbol_block)
+                    symbol_block = normalize_pin_names(symbol_block)
                     symbol_block = ensure_value_visible_in_symbol(symbol_block)
                     if builtin_fp_path is not None:
                         symbol_block = set_footprint_property(symbol_block, f"{lib_name}:{builtin_fp_path.stem}")
                     else:
                         symbol_block = patch_footprint_property(symbol_block, lib_name)
                     for parent_name, parent_block in parent_chain:
+                        parent_block = normalize_pin_names(parent_block)
                         add_or_replace_symbol(symbol_lib_path, parent_name, parent_block)
                     add_or_replace_symbol(symbol_lib_path, symbol_name, symbol_block)
 
@@ -1472,6 +1867,10 @@ class KicadImporter:
                             footprint_path.write_text(content, encoding="utf-8")
                         except Exception:
                             pass
+                    self._apply_footprint_metadata(
+                        footprint_path,
+                        str(enriched_meta.get("source_footprint_ref") or ""),
+                    )
 
                 if not self.is_system_scope:
                     step_copied = self._copy_elibz_step_model(model_title, elibz_path, models_dir)
@@ -1605,6 +2004,102 @@ class KicadImporter:
                         out[key] = val
         return out
 
+    @staticmethod
+    def _normalize_attr_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+    @classmethod
+    def _first_attr_value(cls, attrs: Dict[str, str], alias_names: Iterable[str]) -> str:
+        if not attrs:
+            return ""
+        by_norm = {
+            cls._normalize_attr_key(k): str(v or "").strip()
+            for k, v in attrs.items()
+            if str(k or "").strip()
+        }
+        for alias in alias_names:
+            norm = cls._normalize_attr_key(alias)
+            if not norm:
+                continue
+            val = str(by_norm.get(norm) or "").strip()
+            if val:
+                return val
+        return ""
+
+    @classmethod
+    def _canonicalize_easyeda_attrs_for_db(
+        cls,
+        attrs: Dict[str, str],
+        meta: Optional[Dict] = None,
+        lcsc_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Normalize EasyEDA attributes to canonical keys used in parts DB.
+        """
+        out: Dict[str, str] = {}
+        for k, v in (attrs or {}).items():
+            key = str(k or "").strip()
+            val = str(v or "").strip()
+            if key and val:
+                out[key] = val
+
+        meta = meta or {}
+
+        def _set_if_value(name: str, value: str) -> None:
+            text = str(value or "").strip()
+            if text:
+                out[name] = text
+
+        for canon in cls._DB_CANON_KEYS:
+            value = cls._first_attr_value(out, cls._DB_CANON_ALIASES.get(canon, (canon,)))
+            if value:
+                out[canon] = value
+
+        lcsc_val = str(lcsc_id or meta.get("lcsc_part") or out.get("LCSC Part") or "").strip().upper()
+        if re.match(r"^C\d+$", lcsc_val):
+            out["LCSC Part"] = lcsc_val
+            out.setdefault("Supplier Part", lcsc_val)
+
+        _set_if_value("MFR.Part", str(meta.get("mfr_part") or out.get("MFR.Part") or ""))
+        _set_if_value("Package", str(meta.get("package") or out.get("Package") or ""))
+        _set_if_value("Manufacturer", str(meta.get("manufacturer") or out.get("Manufacturer") or ""))
+        _set_if_value("Description", str(meta.get("description") or out.get("Description") or ""))
+        _set_if_value("First Category", str(meta.get("first_category") or out.get("First Category") or ""))
+        _set_if_value("Second Category", str(meta.get("second_category") or out.get("Second Category") or ""))
+        _set_if_value("Datasheet", str(meta.get("datasheet") or out.get("Datasheet") or ""))
+        _set_if_value("Library Type", str(meta.get("library_type") or out.get("Library Type") or ""))
+
+        if out.get("MFR.Part") and not out.get("Manufacturer Part"):
+            out["Manufacturer Part"] = out["MFR.Part"]
+
+        return out
+
+    @classmethod
+    def _sanitize_symbol_attrs(cls, attrs: Dict[str, str]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        seen_norm: set[str] = set()
+        for key, value in (attrs or {}).items():
+            k = str(key or "").strip()
+            v = str(value or "").strip()
+            if not k or not v:
+                continue
+            norm = cls._normalize_attr_key(k)
+            if not norm:
+                continue
+            if norm in cls._SYMBOL_ATTR_DROP_KEYS:
+                continue
+            if footprint_matcher.is_uuid_like(v) and any(
+                tok in norm for tok in ("symbol", "footprint", "model")
+            ):
+                continue
+            if norm in {"kidescription", "lcscdescription", "partdescription"}:
+                continue
+            if norm in seen_norm:
+                continue
+            seen_norm.add(norm)
+            out[k] = v
+        return out
+
     def _apply_symbol_metadata(
         self,
         symbol_lib_path: Path,
@@ -1614,12 +2109,18 @@ class KicadImporter:
         lcsc_id: Optional[str] = None,
     ) -> None:
         try:
-            attrs = self._parse_attributes_map(str(meta.get("attributes_json") or ""))
+            attrs = self._sanitize_symbol_attrs(
+                self._parse_attributes_map(str(meta.get("attributes_json") or ""))
+            )
+            attrs = self._canonicalize_easyeda_attrs_for_db(
+                attrs,
+                meta=meta,
+                lcsc_id=lcsc_id,
+            )
             mfr_part = str(meta.get("mfr_part") or "").strip()
             manufacturer = str(meta.get("manufacturer") or "").strip()
             description = str(meta.get("description") or "").strip()
             source_symbol_ref = str(meta.get("source_symbol_ref") or "").strip()
-            source_footprint_ref = str(meta.get("source_footprint_ref") or "").strip()
             # Derive component kind from EasyEDA data for correct Value assignment
             component_kind = self._component_kind("", description, attrs)
             if lcsc_id:
@@ -1627,26 +2128,25 @@ class KicadImporter:
             if manufacturer:
                 attrs.setdefault("Manufacturer", manufacturer)
             if description:
-                attrs.setdefault("LCSC Description", description)
-                attrs.setdefault("ki_description", description)
-                attrs.setdefault("Part Description", description)
+                attrs["ki_description"] = description
 
             editor = SymbolEditor(
                 sym_path=symbol_lib_path,
                 symbol_id=symbol_name,
                 parent_window=self.parent_window,
             )
-            changed = editor.update_value_from_attributes(
-                category=component_kind,
-                attrs=attrs,
-                mfr_part=mfr_part,
-                fallback_value=fallback_value,
-            )
+            changed = bool(editor.remove_properties(list(self._SYMBOL_PURGE_PROPS)))
+            changed = bool(
+                editor.update_value_from_attributes(
+                    category=component_kind,
+                    attrs=attrs,
+                    mfr_part=mfr_part,
+                    fallback_value=fallback_value,
+                )
+            ) or changed
             source_props: Dict[str, str] = {}
             if source_symbol_ref:
                 source_props[self._SOURCE_SYMBOL_PROP] = source_symbol_ref
-            if source_footprint_ref:
-                source_props[self._SOURCE_FOOTPRINT_PROP] = source_footprint_ref
             if source_props:
                 changed = bool(
                     editor.apply_properties(
@@ -1675,6 +2175,28 @@ class KicadImporter:
         except Exception as exc:
             import traceback
             self.log(f"Symbol metadata update failed: {exc}\n{traceback.format_exc()}\n")
+
+    def _apply_footprint_metadata(
+        self,
+        footprint_path: Optional[Path],
+        source_footprint_ref: Optional[str],
+    ) -> None:
+        path = Path(footprint_path) if footprint_path else None
+        source_ref = str(source_footprint_ref or "").strip()
+        if not path or not path.exists() or not source_ref:
+            return
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            updated = set_footprint_meta_property(
+                content,
+                self._SOURCE_FOOTPRINT_PROP,
+                source_ref,
+                layer="Cmts.User",
+            )
+            if updated != content:
+                path.write_text(updated, encoding="utf-8")
+        except Exception as exc:
+            self.log(f"Footprint metadata update failed ({path.name}): {exc}\n")
 
     def _model_3d_path(self, models_dir: Path) -> str:
         if self.is_system_scope:

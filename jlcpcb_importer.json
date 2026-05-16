@@ -1,6 +1,6 @@
 {
   "general": {
-    "library_scope": "shared",
+    "library_scope": "project",
     "lib_format": "kicad",
     "kicad_backend": "direct",
     "kicad_builtin_first": true,
@@ -11,7 +11,7 @@
     "hide_button_labels": true,
     "group_by_category": false,
     "lib_prefix": "Monarch",
-    "lib_path": "${KIPRJMOD}/../library",
+    "lib_path": "library",
     "kicad_symbol_map": {
       "resistor": [
         "Device:R",
@@ -48,9 +48,9 @@
       ]
     },
     "kicad_footprint_map": {},
-    "debug_log": false
+    "debug_log": true
   },
   "partselector": {
-    "advanced_visible": false
+    "advanced_visible": true
   }
 }

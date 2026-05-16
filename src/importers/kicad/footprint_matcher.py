@@ -423,16 +423,23 @@ def score_fp_name(mod_name: str, package_candidates: List[str]) -> int:
         p_norm = re.sub(r"[^a-z0-9]", "", p)
         if not p_norm:
             continue
+        pkg_has_digits = bool(re.search(r"\d", p_norm))
         is_dim = is_dimension_like_token(p)
         is_generic = is_generic_pkg_token(p)
         pkg_keywords = {key.lower() for key in family_keywords(p)}
         has_family_overlap = keywords_overlap(pkg_keywords, mod_keywords)
 
         if target_norm == p_norm:
-            score = 120 if not is_dim else 45
+            if pkg_has_digits and not is_dim:
+                score = 230
+            else:
+                score = 120 if not is_dim else 45
             best = max(best, score)
         if p_norm in target_norm:
-            if is_dim:
+            if pkg_has_digits and not is_dim:
+                # Strong signal: concrete package code from source is contained in footprint name.
+                best = max(best, 210 + min(30, len(p_norm)))
+            elif is_dim:
                 idx = target_norm.find(p_norm)
                 in_ep_segment = idx >= 2 and target_norm[idx - 2:idx] in ("ep", "1e")
                 if not in_ep_segment:
@@ -444,7 +451,9 @@ def score_fp_name(mod_name: str, package_candidates: List[str]) -> int:
             else:
                 best = max(best, 90 + min(20, len(p_norm)))
         if p.lower() in target:
-            if is_dim:
+            if pkg_has_digits and not is_dim:
+                best = max(best, 190 + min(25, len(p)))
+            elif is_dim:
                 idx2 = target.find(p.lower())
                 in_ep_segment2 = idx2 >= 2 and target[idx2 - 2:idx2].rstrip("_-") in ("ep", "1ep")
                 if not in_ep_segment2:
@@ -457,4 +466,42 @@ def score_fp_name(mod_name: str, package_candidates: List[str]) -> int:
                 best = max(best, 70 + min(20, len(p)))
         if has_family_overlap:
             best = max(best, 85 + min(20, len(max(pkg_keywords, key=len))))
+    return best
+
+
+def explicit_fp_ref_bonus(mod_name: str, explicit_refs: List[str]) -> int:
+    """Bonus for direct containment/equality with explicit footprint references."""
+    target = str(mod_name or "").lower()
+    target_norm = re.sub(r"[^a-z0-9]", "", target)
+    if not target_norm:
+        return 0
+    best = 0
+    for ref in explicit_refs:
+        token = str(ref or "").strip()
+        if not token:
+            continue
+        if ":" in token:
+            token = token.split(":", 1)[1].strip()
+        if not token:
+            continue
+        if any(ch in token for ch in ("*", "?", "[")):
+            continue
+        if is_uuid_like(token):
+            continue
+        token_low = token.lower()
+        token_norm = re.sub(r"[^a-z0-9]", "", token_low)
+        if not token_norm or len(token_norm) < 3:
+            continue
+        has_digits = bool(re.search(r"\d", token_norm))
+        if target_norm == token_norm:
+            score = 260 if has_digits else 120
+            best = max(best, score)
+            continue
+        if token_norm in target_norm:
+            score = (190 if has_digits else 80) + min(25, len(token_norm))
+            best = max(best, score)
+            continue
+        if token_low in target:
+            score = (160 if has_digits else 60) + min(20, len(token_low))
+            best = max(best, score)
     return best

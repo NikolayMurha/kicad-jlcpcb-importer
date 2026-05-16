@@ -20,7 +20,7 @@ class SymbolEditor:
     - Locates target (symbol "<symbol_id>") block and edits only that block
     - Updates properties; can add hidden ones; ensures footprint prefix
     - Always updates Value for passives from primary attribute
-    - For any symbol with <=2 pins: make pins `(pin passive line ...)` and name `~`; hide pin numbers
+    - For any symbol with <=2 pins: make pins `(pin passive line ...)` and clear pin name; hide pin numbers
     """
 
     def __init__(self, sym_path: Path | str, symbol_id: str, parent_window: Optional[wx.Window] = None):
@@ -115,6 +115,24 @@ class SymbolEditor:
             count=1,
         )
         return new_block, True
+
+    @staticmethod
+    def _property_block_span(block: str, name: str) -> Optional[Tuple[int, int]]:
+        m = re.search(rf'\(property\s*\"{re.escape(name)}\"', block)
+        if not m:
+            return None
+        depth = 0
+        i = m.start()
+        while i < len(block):
+            ch = block[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return (m.start(), i + 1)
+            i += 1
+        return None
 
     @staticmethod
     def _extract_template(block: str) -> Tuple[str, str, str]:
@@ -223,6 +241,26 @@ class SymbolEditor:
             self._block = new_block
         return updates
 
+    def remove_properties(self, names: List[str]) -> int:
+        self._ensure_loaded_block()
+        changes = 0
+        for name in (names or []):
+            pname = str(name or "").strip()
+            if not pname:
+                continue
+            while True:
+                span = self._property_block_span(self._block, pname)
+                if not span:
+                    break
+                s, e = span
+                while e < len(self._block) and self._block[e] in " \t":
+                    e += 1
+                if e < len(self._block) and self._block[e] == "\n":
+                    e += 1
+                self._block = self._block[:s] + self._block[e:]
+                changes += 1
+        return changes
+
     def apply_properties(
         self,
         properties: Dict[str, str],
@@ -307,7 +345,7 @@ class SymbolEditor:
                 new_parts.append(self._block[prev:s])
                 pin_text = self._block[s:e]
                 pin_text = header_re.sub("(pin passive line", pin_text, count=1)
-                pin_text = name_re.sub(r'\1~\3', pin_text, count=1)
+                pin_text = name_re.sub(r"\1\3", pin_text, count=1)
                 new_parts.append(pin_text)
                 prev = e
             new_parts.append(self._block[prev:])

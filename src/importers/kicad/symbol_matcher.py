@@ -13,6 +13,9 @@ DEFAULT_SYMBOL_MAP: Dict[str, List[str]] = {
     "capacitor": ["Device:C", "Device:C_Small", "Device:C_Polarized"],
     "inductor": ["Device:L", "Device:L_Small"],
     "diode": ["Device:D", "Device:D_Small"],
+    "zener": ["Device:D_Zener", "Device:D_Zener_Small", "Device:D"],
+    "tvs": ["Device:D_TVS", "Device:D_Zener", "Device:D"],
+    "schottky": ["Device:D_Schottky", "Device:D_Schottky_Small", "Device:D"],
     "led": ["Device:LED", "Device:LED_Small"],
     "bjt": ["Transistor_BJT:Q_NPN_BCE", "Transistor_BJT:Q_PNP_BCE"],
     "fet": ["Transistor_FET:Q_NMOS_GDS", "Transistor_FET:Q_PMOS_GDS"],
@@ -26,7 +29,7 @@ _REF_PREFIX_KIND_MAP: Dict[str, str] = {
     "L": "inductor",
     "FB": "inductor",
     "D": "diode",
-    "ZD": "diode",
+    "ZD": "zener",
     "LED": "led",
     "Q": "bjt",
     "U": "ic",
@@ -157,6 +160,8 @@ def component_kind(
         ]
     )
     text = raw_text.lower()
+    fet_re = r"\b(mosfets?|jfets?|igbts?|fets?)\b"
+    bjt_re = r"\b(transistors?|bjts?)\b"
     if re.search(r"\b(buzzer|piezo|piezoelectric|sounder|electromagnetic\s+buzzer)\b", text):
         return "default"
     if re.search(r"\b(connector|socket|header|terminal|plug|receptacle)\b", text):
@@ -172,7 +177,14 @@ def component_kind(
 
     ref_hint = normalized_reference_prefix(str(meta.get("reference_prefix") or attrs.get("Reference") or ""))
     mapped_kind = _REF_PREFIX_KIND_MAP.get(ref_hint)
-    if mapped_kind:
+    if ref_hint == "Q":
+        if re.search(fet_re, text):
+            return "fet"
+        if re.search(bjt_re, text):
+            return "bjt"
+        return "bjt"
+    elif mapped_kind and mapped_kind not in ("diode",):
+        # For diode ("D" prefix) fall through to sub-type detection below.
         return mapped_kind
 
     value_hint = str(meta.get("value") or attrs.get("Value") or "").strip().lower()
@@ -183,6 +195,15 @@ def component_kind(
     if re.search(r"\d+(?:\.\d+)?\s*(?:m|k)?(?:ohm|r)\b", value_hint):
         return "resistor"
 
+    if re.search(fet_re, text):
+        return "fet"
+    if re.search(bjt_re, text):
+        return "bjt"
+    if re.search(
+        r"\b(microcontroller|controller|amplifier|logic|integrated(?:\s+circuit)?|ic|sensor|accelerometer|gyroscope|imu|opamp|regulator|adc|dac|gate\s+driver|led\s+driver|motor\s+driver)\b",
+        text,
+    ):
+        return "ic"
     if re.search(r"\b(resistor|resistance)\b", text):
         return "resistor"
     if re.search(r"\b(capacitor|capacitance)\b", text):
@@ -191,19 +212,18 @@ def component_kind(
         return "inductor"
     if re.search(r"\bled\b", text):
         return "led"
-    if re.search(r"\bdiode\b", text):
+    # Diode sub-type detection: check before falling back to generic "diode".
+    # Also triggered when ref_hint mapped to "diode" (prefix "D").
+    is_diode_ref = mapped_kind == "diode"
+    is_diode_text = bool(re.search(r"\b(diode|esd|tvs|surge|transient|electrostatic)\b", text))
+    if is_diode_ref or is_diode_text:
+        if re.search(r"\bschottky\b", text):
+            return "schottky"
+        if re.search(r"\b(zener|vz|voltage\s+regulator\s+diode)\b", text):
+            return "zener"
+        if re.search(r"\b(esd|tvs|surge\s+protect|transient\s+voltage|electrostatic)\b", text):
+            return "tvs"
         return "diode"
-    if re.search(r"\b(esd|tvs|surge|transient|electrostatic)\b", text):
-        return "diode"
-    if re.search(r"\b(mosfet|jfet|igbt|fet)\b", text):
-        return "fet"
-    if re.search(r"\b(transistor|bjt)\b", text):
-        return "bjt"
-    if re.search(
-        r"\b(microcontroller|controller|amplifier|logic|integrated(?:\s+circuit)?|ic|sensor|accelerometer|gyroscope|imu|opamp|regulator|adc|dac|gate\s+driver|led\s+driver|motor\s+driver)\b",
-        text,
-    ):
-        return "ic"
     return "default"
 
 
@@ -217,10 +237,19 @@ def family_symbol_candidates(part_number: str) -> List[str]:
     out: List[str] = []
     upper = text.upper()
     if len(upper) < 6:
-        return []
+        if len(upper) >= 5:
+            out.append(upper + "*")
+            out.append(upper[:-1] + "*")
+            if upper[-1].isdigit():
+                out.append(upper + "A")
+                out.append(upper + "A*")
+        return uniq(out)
+
+    # Prefer exact-prefix extension first: AO3401 -> AO3401* (matches AO3401A).
+    out.append(upper + "*")
 
     for cut in (1, 2):
-        if len(upper) - cut < 6:
+        if len(upper) - cut < 5:
             continue
         prefix = upper[:-cut]
         out.append(prefix + "*")

@@ -5,6 +5,7 @@
     "lib_path": "${KIPRJMOD}/library",
     "lib_format": "easyeda_pro",
     "kicad_builtin_first": true,
+    "kicad_symbol_matching_enabled": false,
     "kicad_symbol_index_ttl_sec": 86400,
     "kicad_symbol_index_max_libs": 300,
     "kicad_footprint_fuzzy_max_libs": 12,
