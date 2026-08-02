@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import tempfile
+import time
 from typing import Callable, Optional
 from zipfile import BadZipFile, ZipFile
 
@@ -17,6 +18,36 @@ from zipfile import BadZipFile, ZipFile
 ProgressCallback = Optional[Callable[[float], None]]
 _CHUNK_RE = re.compile(r"^parts-fts5\.db\.zip\.(\d{3})$")
 _DATABASE_NAME = "parts-fts5.db"
+_LOGGER = logging.getLogger(__name__)
+
+
+def _replace_database(
+    source: Path,
+    destination: Path,
+    *,
+    attempts: int = 6,
+    replace: Callable[[Path, Path], None] = os.replace,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Replace a database, tolerating short-lived Windows sharing locks."""
+
+    for attempt in range(attempts):
+        try:
+            replace(source, destination)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            sleep(0.05 * (attempt + 1))
+
+
+def _safe_unlink(path: Path) -> None:
+    """Remove a temporary artifact without masking a successful install."""
+
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        _LOGGER.warning("Could not remove temporary database artifact %s: %s", path, exc)
 
 
 def _database_chunks(path: Path) -> list[Path]:
@@ -104,15 +135,13 @@ def install_parts_database(
             raise ValueError(f"Invalid database ZIP archive: {exc}") from exc
 
         _validate_extracted_database(database_temp)
-        os.replace(database_temp, final_database)
+        _replace_database(database_temp, final_database)
         for chunk in chunks:
-            chunk.unlink()
+            _safe_unlink(chunk)
         return final_database
     finally:
-        if archive_path.exists():
-            archive_path.unlink()
-        if database_temp.exists():
-            database_temp.unlink()
+        _safe_unlink(archive_path)
+        _safe_unlink(database_temp)
 
 
 def unzip_parts(parent, path):
@@ -128,8 +157,7 @@ def unzip_parts(parent, path):
         UnzipExtractingStartedEvent,
     )
 
-    logger = logging.getLogger(__name__)
-    logger.debug("Combine and atomically install database chunks")
+    _LOGGER.debug("Combine and atomically install database chunks")
     wx.PostEvent(parent, UnzipCombiningStartedEvent())
 
     extraction_started = False

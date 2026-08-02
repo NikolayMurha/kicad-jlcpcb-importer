@@ -13,6 +13,17 @@ except ImportError:
     requests = None
 
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/134.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def _require_requests():
     """Load requests after the runtime dependency installer has run."""
 
@@ -35,9 +46,8 @@ class LCSC_API:
     LCSC_PRODUCT_BASE = "https://www.lcsc.com/product-detail"
 
     def __init__(self):
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
-        }  # pretend we are browser, otherwise their cloud service blocks the request
+        # EasyEDA rejects obvious non-browser clients with an HTML 403 response.
+        self.headers = dict(BROWSER_HEADERS)
 
     def get_part_data(self, lcsc_number: str) -> dict:
         """Get data for a given LCSC number from the API."""

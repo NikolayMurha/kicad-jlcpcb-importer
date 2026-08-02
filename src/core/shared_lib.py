@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -123,8 +124,18 @@ def ensure_project_table_links(project_dir: Path, shared_root: Path, log: Option
         except Exception as exc:
             _log(
                 log,
-                "Symlink creation failed; copied table file instead. "
-                "Check filesystem and sandbox permissions if live linking is required.\n",
+                "Symlink creation failed; trying a hard link before copying the table.\n",
+            )
+            _log(log, f"Details: {exc}\n")
+        try:
+            os.link(src, dst)
+            _log(log, f"Hard-linked project table: {dst} -> {src}\n")
+            continue
+        except Exception as exc:
+            _log(
+                log,
+                "Hard-link creation failed; copied table file instead. "
+                "Shared table changes will be synchronized on the next plugin run.\n",
             )
             _log(log, f"Details: {exc}\n")
             shutil.copy2(src, dst)
@@ -172,12 +183,33 @@ def ensure_project_legacy_models_link(
 
     rel_target = os.path.relpath(models_dir, project_dir)
     try:
-        legacy.symlink_to(rel_target)
+        legacy.symlink_to(rel_target, target_is_directory=True)
         _log(log, f"Linked legacy models path: {legacy} -> {rel_target}\n")
+        return
     except Exception as exc:
         _log(
             log,
-            "Legacy models symlink creation failed. "
+            "Legacy models symlink creation failed; trying a Windows junction.\n"
+            if os.name == "nt"
+            else "Legacy models symlink creation failed. "
             "Check filesystem and sandbox permissions.\n",
         )
         _log(log, f"Details: {exc}\n")
+
+    if os.name != "nt":
+        return
+
+    try:
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(legacy), str(models_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and legacy.exists():
+            _log(log, f"Created Windows junction: {legacy} -> {models_dir}\n")
+            return
+        details = (result.stderr or result.stdout or "unknown error").strip()
+        _log(log, f"Windows junction creation failed: {details}\n")
+    except Exception as exc:
+        _log(log, f"Windows junction creation failed: {exc}\n")

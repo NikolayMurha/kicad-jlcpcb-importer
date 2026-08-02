@@ -4,13 +4,14 @@ on:  # yamllint disable-line rule:truthy
   push:
     branches:
       - main
+      - develop
   pull_request:
 jobs:
   tests:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -24,8 +25,4 @@ jobs:
       - name: Run database and core tests
         run: |
           python -m unittest discover -s db_build/tests -p 'test_*.py'
-          python -m unittest \
-            src.core.test_price \
-            src.core.test_part_search \
-            src.core.test_platform_support \
-            src.importers.test_unzip_parts
+          python -m unittest src.core.test_price src.core.test_part_search src.core.test_platform_support src.core.test_lcsc_api src.core.test_shared_lib src.importers.test_unzip_parts

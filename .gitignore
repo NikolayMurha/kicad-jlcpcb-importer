@@ -9,3 +9,8 @@ resources.zip
 .claude/
 rnd/
 kicad/
+/cache/
+/jlcpcb_importer.json
+/settings.json
+/*.elibz
+/Untitled-*.txt

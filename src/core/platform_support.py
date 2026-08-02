@@ -1,4 +1,4 @@
-"""Linux and macOS runtime path discovery for KiCad integrations."""
+"""Cross-platform runtime path discovery for KiCad integrations."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 from typing import Callable, Mapping, Optional
 
 
-SUPPORTED_SYSTEMS = frozenset({"Darwin", "Linux"})
+SUPPORTED_SYSTEMS = frozenset({"Darwin", "Linux", "Windows"})
 
 
 def is_supported_system(system_name: Optional[str] = None) -> bool:
@@ -42,7 +42,7 @@ def resolve_system_library_root(
     home: Optional[Path | str] = None,
     version_text: Optional[str] = None,
 ) -> Path:
-    """Resolve KiCad's per-user ``3rdparty`` root on Linux and macOS."""
+    """Resolve KiCad's per-user ``3rdparty`` root on supported platforms."""
 
     env = os.environ if environ is None else environ
     major = detected_kicad_major(version_text)
@@ -62,6 +62,10 @@ def resolve_system_library_root(
         return user_home / "Documents" / "KiCad" / version_dir / "3rdparty"
     if system == "Linux":
         return user_home / ".local" / "share" / "kicad" / version_dir / "3rdparty"
+    if system == "Windows":
+        profile = str(env.get("USERPROFILE", "")).strip()
+        documents_home = Path(profile) if profile else user_home
+        return documents_home / "Documents" / "KiCad" / version_dir / "3rdparty"
 
     # Preserve best-effort behavior on unclaimed platforms.
     return Path(plugin_path) / "libraries"
@@ -91,6 +95,8 @@ def find_kicad_cli(
 
     which_fn = shutil.which if which is None else which
     discovered = which_fn("kicad-cli")
+    if not discovered and (system_name or platform.system()) == "Windows":
+        discovered = which_fn("kicad-cli.exe")
     if discovered:
         return discovered
 
@@ -98,7 +104,8 @@ def find_kicad_cli(
     running_executable = executable or sys.executable
     candidates = []
     if running_executable:
-        candidates.append(Path(running_executable).parent / "kicad-cli")
+        executable_name = "kicad-cli.exe" if system == "Windows" else "kicad-cli"
+        candidates.append(Path(running_executable).parent / executable_name)
 
     if system == "Darwin":
         candidates.extend(
@@ -119,6 +126,15 @@ def find_kicad_cli(
         app_dir = str(env.get("APPDIR", "")).strip()
         if app_dir:
             candidates.insert(0, Path(app_dir) / "usr" / "bin" / "kicad-cli")
+    elif system == "Windows":
+        program_roots = []
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            value = str(env.get(variable, "")).strip()
+            if value and value not in program_roots:
+                program_roots.append(value)
+        for root in program_roots:
+            for version in ("10.0", "9.0"):
+                candidates.append(Path(root) / "KiCad" / version / "bin" / "kicad-cli.exe")
 
     for candidate in candidates:
         if check(candidate):

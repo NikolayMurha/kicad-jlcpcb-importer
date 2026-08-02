@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from zipfile import ZipFile
 
-from src.importers.unzip_parts import install_parts_database
+from src.importers.unzip_parts import _replace_database, install_parts_database
 
 
 def _make_database(path: Path, marker: str) -> None:
@@ -39,6 +39,27 @@ def _split_archive(directory: Path, database: Path, chunk_size: int = 97) -> lis
 
 
 class InstallPartsDatabaseTests(unittest.TestCase):
+    def test_replace_retries_transient_windows_file_lock(self) -> None:
+        calls = []
+        sleeps = []
+
+        def replace(source: Path, destination: Path) -> None:
+            calls.append((source, destination))
+            if len(calls) < 3:
+                raise PermissionError("sharing violation")
+
+        source = Path("source.db")
+        destination = Path("parts-fts5.db")
+        _replace_database(
+            source,
+            destination,
+            replace=replace,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [0.05, 0.1])
+
     def test_replaces_only_after_valid_archive(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             directory = Path(raw_dir)

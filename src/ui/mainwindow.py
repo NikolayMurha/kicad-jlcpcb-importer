@@ -161,6 +161,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.scale_factor = 1.0
         self._library_rename_timer = None
         self._pending_library_rename = None
+        self._active_import_jobs = 0
 
         # Project context
         try:
@@ -182,6 +183,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
         # Build the PartSelectorDialog with self as the logical parent context
         super().__init__(self, parts={})
+        self.Bind(wx.EVT_CLOSE, self._on_close_request)
 
         # Now that wx is initialized, update window and scale factor
         self.window = wx.GetTopLevelParent(self) or self
@@ -656,7 +658,57 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 if btn is not None:
                     wx.CallAfter(btn.Enable, True)
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._start_import_worker(_worker)
+
+    def _start_import_worker(self, target) -> None:
+        """Retain the window until an import worker has stopped posting wx events."""
+
+        self._active_import_jobs += 1
+
+        def _runner():
+            try:
+                target()
+            finally:
+                wx.CallAfter(self._finish_import_job)
+
+        try:
+            threading.Thread(target=_runner, daemon=True).start()
+        except Exception:
+            self._active_import_jobs = max(0, self._active_import_jobs - 1)
+            raise
+
+    def _finish_import_job(self) -> None:
+        self._active_import_jobs = max(0, self._active_import_jobs - 1)
+
+    def _active_background_work(self) -> str:
+        if self._active_import_jobs:
+            return "component import"
+        if getattr(self.library, "state", None) == LibraryState.DOWNLOAD_RUNNING:
+            return "database update"
+        if self._deps_installing:
+            return "dependency installation"
+        if self._symbol_index_warmup_running:
+            return "symbol index build"
+        return ""
+
+    @staticmethod
+    def _show_close_blocked(work: str) -> None:
+        wx.MessageBox(
+            f"A {work} is still running. Wait for it to finish before closing the plugin.",
+            "JLCPCB Importer",
+            wx.OK | wx.ICON_INFORMATION,
+        )
+
+    def _on_close_request(self, event) -> None:
+        """Do not destroy wx controls while a worker still references them."""
+
+        work = self._active_background_work()
+        if work:
+            if event.CanVeto():
+                event.Veto()
+            self._show_close_blocked(work)
+            return
+        event.Skip()
 
     def _import_part_via_easyeda(self, lcsc_id: str):
         scope = self._ensure_library_scope_selected()
@@ -701,7 +753,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                     LogboxAppendEvent(msg=f"*********  IMPORT FAILED: {lcsc_id}  *********\n"),
                 )
                 wx.CallAfter(self.show_import_status, 0, 1)
-        threading.Thread(target=_worker, daemon=True).start()
+        self._start_import_worker(_worker)
 
     def _ensure_library_scope_selected(self) -> Optional[str]:
         """Return existing library scope or ask the user to choose.
@@ -2324,6 +2376,15 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             pass
 
     def Destroy(self):  # noqa: N802 - wx override
+        work = self._active_background_work()
+        if work:
+            self._show_close_blocked(work)
+            return False
+        try:
+            if self._library_rename_timer is not None:
+                self._library_rename_timer.Stop()
+        except Exception:
+            pass
         # Clean up logging handlers to avoid duplicates on reopen
         try:
             root = logging.getLogger()

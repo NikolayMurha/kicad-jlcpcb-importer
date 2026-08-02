@@ -1,4 +1,4 @@
-"""EasyEDA to KiCad import orchestrator for LCSC parts using ComponentLoader."""
+"""Built-in EasyEDA Pro to KiCad import orchestrator for LCSC parts."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from .component_loader import ComponentLoader, MODELS_DIR
 
 
 class EasyedaProImporter:
-    """Importer that reuses ComponentLoader for EasyEDA Pro (.elibz) output."""
+    """Importer backed by the bundled EasyEDA Pro (.elibz) converter."""
 
     def __init__(
         self,

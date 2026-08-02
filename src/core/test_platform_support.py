@@ -1,4 +1,4 @@
-"""Tests for Linux and macOS KiCad runtime path discovery."""
+"""Tests for cross-platform KiCad runtime path discovery."""
 
 from pathlib import Path
 import unittest
@@ -15,7 +15,8 @@ class PlatformSupportTests(unittest.TestCase):
     def test_supported_systems(self) -> None:
         self.assertTrue(is_supported_system("Darwin"))
         self.assertTrue(is_supported_system("Linux"))
-        self.assertFalse(is_supported_system("Windows"))
+        self.assertTrue(is_supported_system("Windows"))
+        self.assertFalse(is_supported_system("Plan9"))
 
     def test_kicad_major_and_environment_override(self) -> None:
         self.assertEqual(detected_kicad_major("10.0.5"), 10)
@@ -45,6 +46,18 @@ class PlatformSupportTests(unittest.TestCase):
         )
         self.assertEqual(linux, Path("/home/test/.local/share/kicad/9.0/3rdparty"))
         self.assertEqual(mac, Path("/Users/test/Documents/KiCad/10.0/3rdparty"))
+
+        windows = resolve_system_library_root(
+            "/plugin",
+            system_name="Windows",
+            environ={"USERPROFILE": "C:/Users/test"},
+            home="C:/fallback",
+            version_text="10.0.1",
+        )
+        self.assertEqual(
+            windows,
+            Path("C:/Users/test/Documents/KiCad/10.0/3rdparty"),
+        )
 
     def test_cli_environment_override(self) -> None:
         expected = Path("/opt/kicad/bin/kicad-cli")
@@ -79,6 +92,17 @@ class PlatformSupportTests(unittest.TestCase):
             ),
             str(mac),
         )
+
+    def test_windows_cli_candidates(self) -> None:
+        expected = Path("C:/Program Files/KiCad/10.0/bin/kicad-cli.exe")
+        result = find_kicad_cli(
+            system_name="Windows",
+            environ={"PROGRAMFILES": "C:/Program Files"},
+            executable="C:/Program Files/KiCad/10.0/bin/python.exe",
+            which=lambda _name: None,
+            is_executable=lambda path: path == expected,
+        )
+        self.assertEqual(result, str(expected))
 
 
 if __name__ == "__main__":

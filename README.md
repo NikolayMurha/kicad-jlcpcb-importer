@@ -5,14 +5,15 @@
 Thanks and credit to the original project that inspired this work:
 [Bouni/bouni-kicad-repository](https://github.com/Bouni/bouni-kicad-repository)
 
-- Supported platforms: Linux and macOS
+- Supported platforms: Linux, macOS, and Windows
 - Supported KiCad versions: KiCad 9 and newer
-- Windows is currently outside the supported and tested platform matrix.
+- Python-level CI runs on all three platforms. KiCad GUI/runtime behavior is
+  validated separately because KiCad is not installed in CI.
 
 What it does
 
 - Search LCSC/JLCPCB catalog and assign LCSC numbers to footprints
-- Import symbols, footprints, and 3D models via the EasyEDA ComponentLoader backend
+- Import symbols, footprints, and 3D models via the built-in EasyEDA Pro backend
 - In `KiCad` output mode: try matching built-in KiCad symbols/footprints first (common R/C/L/diode/transistor/IC), then fallback to EasyEDA conversion
 - Choose where to store generated libraries: Project or System (KiCad 9 3rd‑party locations)
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
@@ -97,6 +98,13 @@ cd ~/Documents/KiCad/{version}/scripting/plugins
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
+#### Windows (PowerShell)
+
+```powershell
+cd "$env:USERPROFILE\Documents\KiCad\{version}\scripting\plugins"
+git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
+```
+
 You may need to create the `scripting/plugins` folder if it does not exist.
 
 ### Flatpak :warning:
@@ -133,6 +141,11 @@ When you choose System as the storage location, generated libraries are placed u
   - `~/.local/share/kicad/9.0/3rdparty/footprints/{plugin_dir_name}`
   - `~/.local/share/kicad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
 
+- Windows
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\symbols\{plugin_dir_name}`
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\footprints\{plugin_dir_name}`
+  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\3dmodels\{plugin_dir_name}`
+
 ## Icons
 
 This plugin makes use of a lot of icons from the excellent [Material Design Icons](https://materialdesignicons.com/)
@@ -154,7 +167,7 @@ In the near future I'll add `ruff` / `pylint` and possibly other pre-commit-hook
 
 ## Notes
 
-- This fork focuses on searching LCSC parts and managing KiCad library assignments with EasyEDA ComponentLoader for imports.
+- This fork focuses on searching LCSC parts and managing KiCad library assignments with a bundled EasyEDA Pro importer.
 - Fabrication (Gerber/CPL/BOM) features from the original tool are not included.
 
 ## python libraries
@@ -201,6 +214,7 @@ The `{KiCad python}` should be used, this can be found at different locations de
 |---|---|
 |Mac| /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 |
 |Linux| /usr/bin/python3 |
+|Windows| C:\Program Files\KiCad\{version}\bin\python.exe |
 
 #### Working directory
 
@@ -210,6 +224,7 @@ The `{working directory}` should be your plugins directory, ie:
 |---|---|
 |Mac| ~/Documents/KiCad/{version}/scripting/plugins/ |
 |Linux| ~/.local/share/kicad/{version}/scripting/plugins/ |
+|Windows| %USERPROFILE%\Documents\KiCad\{version}\scripting\plugins\ |
 
 > [!NOTE]  
 > `{version}` is 9.0 or newer.
@@ -245,7 +260,14 @@ For example on Mac:
 For example on Linux:
 
 ```sh
-cd ~/.local/share/kicad/8.0/scripting/plugins/ && python -m kicad-jlcpcb-importer
+cd ~/.local/share/kicad/9.0/scripting/plugins/ && python -m kicad-jlcpcb-importer
+```
+
+For example on Windows PowerShell:
+
+```powershell
+cd "$env:USERPROFILE\Documents\KiCad\9.0\scripting\plugins"
+& "C:\Program Files\KiCad\9.0\bin\python.exe" -m kicad-jlcpcb-importer
 ```
 
 #### IDE
