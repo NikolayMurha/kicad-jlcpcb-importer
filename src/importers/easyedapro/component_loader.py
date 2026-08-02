@@ -5,10 +5,10 @@ import traceback
 import concurrent.futures
 import zipfile
 
-from logging import info, warning, debug, error, critical
+from logging import info, warning, debug, error
 from typing import Callable, Optional
 
-from pcbnew import *  # type: ignore
+import pcbnew  # type: ignore
 
 from . import decryptor
 from ...core.lcsc_api import LCSC_API
@@ -165,12 +165,12 @@ class ComponentLoader():
             if not skip_models:
                 self.downloadModels(libDeviceFile, fetched_3dmodels)
             self.progress(100, 100)
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
             error(f"Failed to download components: {traceback.format_exc()}")
 
     def downloadSymFp(self, components):
-        info(f"Fetching info...")
+        info("Fetching info...")
 
         # Separate components into code-based and direct UUIDs
         code_components = []
@@ -361,7 +361,7 @@ class ComponentLoader():
         self.statFailed = 0
 
         info( "*****************************" )
-        info(f"Loading 3D models...")
+        info("Loading 3D models...")
         self.progress(0, 100)
 
         uuidToTargetFileMap = {}
@@ -419,14 +419,14 @@ class ComponentLoader():
                 jfilePath = kfilePath + "_jlc"
 
                 debug( "Loading STEP model %s" % (file_name) )
-                model: UTILS_STEP_MODEL = UTILS_STEP_MODEL.LoadSTEP(jfilePath)
+                model: pcbnew.UTILS_STEP_MODEL = pcbnew.UTILS_STEP_MODEL.LoadSTEP(jfilePath)
 
                 if not model:
                     error( "Error loading model '%s'" % (file_name) )
                     return
                 
                 debug( "Converting STEP model '%s'" % (file_name) )
-                bbox: UTILS_BOX3D = model.GetBoundingBox()
+                bbox: pcbnew.UTILS_BOX3D = model.GetBoundingBox()
 
                 try:
                     if directUuid in uuidsToTransform:
@@ -434,9 +434,9 @@ class ComponentLoader():
                         fitXmm = uuidsToTransform[directUuid][0] / 39.37
                         fitYmm = uuidsToTransform[directUuid][1] / 39.37
 
-                        bsize: VECTOR3D = bbox.GetSize()
-                        scaleFactorX = fitXmm / bsize.x;
-                        scaleFactorY = fitYmm / bsize.y;
+                        bsize: pcbnew.VECTOR3D = bbox.GetSize()
+                        scaleFactorX = fitXmm / bsize.x
+                        scaleFactorY = fitYmm / bsize.y
                         scaleFactor = ( scaleFactorX + scaleFactorY ) / 2
 
                         debug( "Dimensions %f %f factors %f %f avg %f model '%s'" %
@@ -448,7 +448,7 @@ class ComponentLoader():
                             warning( "**** The model '%s' might be misoriented! ****" % (file_name) )
                         elif abs( scaleFactor - 1.0 ) > 0.01:
                             warning( "Scaling '%s' by %f" % (file_name, scaleFactor) )
-                            model.Scale( scaleFactor );
+                            model.Scale( scaleFactor )
                         else:
                             debug( "No scaling for %s" % (file_name) )
 
@@ -458,7 +458,7 @@ class ComponentLoader():
                     return
 
                 newbbox          = model.GetBoundingBox()
-                center: VECTOR3D = newbbox.GetCenter()
+                center: pcbnew.VECTOR3D = newbbox.GetCenter()
 
                 model.Translate( -center.x, -center.y, -newbbox.Min().z )
 

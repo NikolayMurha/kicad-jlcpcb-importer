@@ -16,7 +16,7 @@ from ...core.shared_lib import (
     ensure_project_table_links,
     ensure_shared_meta,
 )
-from .component_loader import ComponentLoader, MODELS_DIR
+from .component_loader import ComponentLoader
 
 
 class EasyedaProImporter:

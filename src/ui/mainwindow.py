@@ -11,7 +11,7 @@ import shlex
 from pathlib import Path
 import wx
 import wx.dataview as dv
-from typing import Optional, Dict
+from typing import Optional
 
 from .partselector import PartSelectorDialog
 from .settings import SettingsDialog
@@ -22,7 +22,6 @@ from ..core.helpers import (
     PLUGIN_PATH,
     sanitize_lib_name,
     as_bool,
-    apply_button_label_tooltips,
 )
 from ..core.events import (
     EVT_LOGBOX_APPEND_EVENT,

@@ -92,10 +92,6 @@ def ensure_project_table_links(project_dir: Path, shared_root: Path, log: Option
                 src_text = src.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 src_text = ""
-            try:
-                dst_text = dst.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                dst_text = ""
             if (not src_text.strip()) or (src_text.strip() == header.strip()):
                 try:
                     shutil.copy2(dst, src)
