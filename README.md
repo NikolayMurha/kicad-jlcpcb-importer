@@ -165,6 +165,23 @@ This plugin makes use of a lot of icons from the excellent [Material Design Icon
 Make sure you make use of pre-commit hooks in order to format everything nicely with `black`
 In the near future I'll add `ruff` / `pylint` and possibly other pre-commit-hooks that enforce nice and clean code style.
 
+## Release versioning
+
+Plugin releases use calendar versions in the exact form `YYYY.MM.DD`, without a
+`v` prefix. Only one release is created per calendar date.
+
+Release procedure:
+
+1. Set the root `VERSION` file to the release date.
+2. Merge the release commit into `main` and wait for CI to pass.
+3. Create a tag with the same value as `VERSION`, pointing at that exact commit.
+4. Publish a GitHub Release for the tag.
+
+The PCM workflow checks out the tag rather than a branch, validates the calendar
+date, verifies that `VERSION` matches the tag, and then publishes
+`KiCAD-PCM-YYYY.MM.DD.zip`. A manual PCM workflow run also requires an existing
+release tag and packages that tag only.
+
 ## Notes
 
 - This fork focuses on searching LCSC parts and managing KiCad library assignments with a bundled EasyEDA Pro importer.

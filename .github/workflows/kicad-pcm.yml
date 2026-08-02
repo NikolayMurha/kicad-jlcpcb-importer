@@ -9,32 +9,41 @@ on:  # yamllint disable-line rule:truthy
     types:
       - published
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release tag to package (YYYY.MM.DD)"
+        required: true
+        type: string
 
 jobs:
   create_archive:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.release.tag_name || inputs.version }}
     steps:
-      - name: Get latest tag
-        uses: oprypin/find-latest-tag@v1
-        with:
-          repository: NikolayMurha/kicad-jlcpcb-importer
-          releases-only: true
-        id: latest-release
-
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.VERSION }}
+          fetch-depth: 0
+
+      - name: Validate release version and tag
+        run: |
+          python3 -c 'from datetime import datetime; import os; datetime.strptime(os.environ["VERSION"], "%Y.%m.%d")'
+          test "$(tr -d '[:space:]' < VERSION)" = "$VERSION"
+          test "$(git tag --points-at HEAD --list "$VERSION")" = "$VERSION"
 
       - name: Create archive
-        run: sh ./PCM/create_pcm_archive.sh ${{ steps.latest-release.outputs.tag }}
+        run: sh ./PCM/create_pcm_archive.sh "$VERSION"
 
       - name: Upload zip as asset to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./PCM/KiCAD-PCM-${{ steps.latest-release.outputs.tag }}.zip
-          asset_name: KiCAD-PCM-${{ steps.latest-release.outputs.tag }}.zip
+          file: ./PCM/KiCAD-PCM-${{ env.VERSION }}.zip
+          asset_name: KiCAD-PCM-${{ env.VERSION }}.zip
           overwrite: true
-          tag: ${{ steps.latest-release.outputs.tag }}
+          tag: ${{ env.VERSION }}
 
       - name: Trigger custom kicad repo rebuild
         uses: benc-uk/workflow-dispatch@v1

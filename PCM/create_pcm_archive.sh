@@ -9,6 +9,22 @@ ARCHIVE_ROOT="PCM/archive"
 PLUGIN_ROOT="$ARCHIVE_ROOT/plugins"
 RESOURCE_ROOT="$ARCHIVE_ROOT/resources"
 
+if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$'; then
+  echo "Invalid version '$VERSION': expected CalVer YYYY.MM.DD" >&2
+  exit 2
+fi
+
+python3 -c 'from datetime import datetime; import sys; datetime.strptime(sys.argv[1], "%Y.%m.%d")' "$VERSION" || {
+  echo "Invalid calendar date in version '$VERSION'" >&2
+  exit 2
+}
+
+SOURCE_VERSION=$(tr -d '[:space:]' < VERSION)
+if [ "$SOURCE_VERSION" != "$VERSION" ]; then
+  echo "VERSION file contains '$SOURCE_VERSION', expected '$VERSION'" >&2
+  exit 2
+fi
+
 echo "Clean up old files"
 rm -f PCM/*.zip
 rm -rf "$ARCHIVE_ROOT"
