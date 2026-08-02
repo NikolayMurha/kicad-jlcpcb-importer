@@ -1,6 +1,7 @@
 """Contains the part selector modal window."""
 
 import logging
+import io
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -16,8 +17,9 @@ except Exception:  # Pillow is declared in requirements.txt
 
 from .datamodel import PartSelectorDataModel
 from ..core.derive_params import params_for_part  # pylint: disable=import-error
+from ..core.price import price_for_quantity
 from ..core.events import AssignPartsEvent, UpdateSetting
-from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, apply_button_label_tooltips
+from ..core.helpers import HighResWxSize, loadBitmapScaled, GetScaleFactor, apply_button_label_tooltips, as_bool
 from .partdetails import PartDetailsDialog
 from ..core.lcsc_api import LCSC_API
 from ..core.library import LibraryState
@@ -55,6 +57,11 @@ class PartSelectorDialog(wx.Dialog):
         self.settings = getattr(self.parent, "settings", {})
         self.parts = parts
         self._lcsc_api = LCSC_API()
+        self._destroying = False
+        self._details_generation = 0
+        self._part_data_cache = {}
+        self._part_data_locks = {}
+        self._part_data_cache_ttl = 300.0
         self._selected_lcsc = None
         self._pdfurl = ""
         self._pageurl = ""
@@ -829,7 +836,7 @@ class PartSelectorDialog(wx.Dialog):
         self.Centre(wx.BOTH)
         apply_button_label_tooltips(self, overwrite=True)
         self.apply_hide_button_labels_setting(
-            self._as_bool(
+            as_bool(
                 (self.settings.get("general", {}) or {}).get("hide_button_labels"),
                 default=False,
             )
@@ -886,22 +893,6 @@ class PartSelectorDialog(wx.Dialog):
         if ready:
             self.refresh_categories()
 
-    @staticmethod
-    def _as_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
-
     def apply_hide_button_labels_setting(self, hidden: bool):
         try:
             hide = bool(hidden)
@@ -950,8 +941,10 @@ class PartSelectorDialog(wx.Dialog):
 
     def quit_dialog(self, *_):
         """Close this window."""
-        self.Destroy()
-        self.EndModal(0)
+        if self.IsModal():
+            self.EndModal(0)
+        else:
+            self.Destroy()
 
     def OnSortPartList(self, e):
         """Set order_by to the clicked column and trigger list refresh."""
@@ -1042,23 +1035,7 @@ class PartSelectorDialog(wx.Dialog):
 
     def get_price(self, quantity, prices) -> float:
         """Find the price for the number of selected parts accordning to the price ranges."""
-        price_ranges = prices.split(",")
-        if not price_ranges[0]:
-            return -1.0
-        min_quantity = int(price_ranges[0].split("-")[0])
-        if quantity <= min_quantity:
-            range, price = price_ranges[0].split(":")
-            return float(price)
-        for p in price_ranges:
-            range, price = p.split(":")
-            lower, upper = range.split("-")
-            if not upper:  # upper bound of price ranges
-                return float(price)
-            lower = int(lower)
-            upper = int(upper)
-            if lower <= quantity < upper:
-                return float(price)
-        return -1.0
+        return price_for_quantity(quantity, prices)
 
     @staticmethod
     def _format_currency(value: float) -> str:
@@ -1141,7 +1118,7 @@ class PartSelectorDialog(wx.Dialog):
             dialog.ShowModal()
 
     def update_selected_part_details(self):
-        """Fetch preview image and urls for currently selected item."""
+        """Fetch preview URLs without blocking the wx event loop."""
         try:
             item = self.part_list.GetSelection()
             lcsc = self.part_list_model.get_lcsc(item)
@@ -1150,25 +1127,57 @@ class PartSelectorDialog(wx.Dialog):
         if not lcsc or lcsc == self._selected_lcsc:
             return
         self._selected_lcsc = lcsc
+        self._pdfurl = ""
+        self._pageurl = ""
+        self._details_generation += 1
+        generation = self._details_generation
         try:
-            wx.BeginBusyCursor()
-            result = self._lcsc_api.get_part_data(lcsc)
-        except Exception:
-            result = {"success": False}
-        finally:
-            try:
-                wx.EndBusyCursor()
-            except Exception:
-                self.logger.exception("wx.EndBusyCursor failed in update_selected_part_details")
+            self._thumb_executor.submit(self._load_part_details_worker, lcsc, generation)
+        except RuntimeError:
+            return
+
+    def _load_part_details_worker(self, lcsc: str, generation: int) -> None:
+        result = self._fetch_part_data_cached(lcsc)
+        wx.CallAfter(self._apply_part_details_result, lcsc, generation, result)
+
+    def _apply_part_details_result(self, lcsc: str, generation: int, result: dict) -> None:
+        if (
+            self._destroying
+            or generation != self._details_generation
+            or lcsc != self._selected_lcsc
+        ):
+            return
         if not result or not result.get("success"):
-            # Reset
             self._pdfurl = ""
             self._pageurl = ""
             return
         data = result.get("data", {}).get("data", {})
         self._pdfurl = self._lcsc_api.resolve_datasheet_url(data)
         self._pageurl = self._lcsc_api.resolve_part_page_url(data, lcsc_number=lcsc)
-        # Right-side preview image removed; keep URLs only
+
+    def _fetch_part_data_cached(self, lcsc: str) -> dict:
+        """Coalesce concurrent detail/thumbnail requests and cache briefly."""
+
+        now = time.monotonic()
+        with self._thumb_lock:
+            cached = self._part_data_cache.get(lcsc)
+            if cached and now - cached[0] < self._part_data_cache_ttl:
+                return cached[1]
+            request_lock = self._part_data_locks.setdefault(lcsc, Lock())
+
+        with request_lock:
+            now = time.monotonic()
+            with self._thumb_lock:
+                cached = self._part_data_cache.get(lcsc)
+                if cached and now - cached[0] < self._part_data_cache_ttl:
+                    return cached[1]
+            try:
+                result = self._lcsc_api.get_part_data(lcsc)
+            except Exception:
+                result = {"success": False}
+            with self._thumb_lock:
+                self._part_data_cache[lcsc] = (time.monotonic(), result)
+            return result
         
     def get_scaled_bitmap(self, url, width, height):
         """Download a picture from a URL and convert it into a wx Bitmap.
@@ -1608,14 +1617,14 @@ class PartSelectorDialog(wx.Dialog):
             pass
 
     def _load_thumbnail_worker(self, lcsc: str, width: int, height: int, generation: int, row_index: int):
-        # Resolve image URL via API
+        """Download/decode image bytes; wx objects are created by the UI callback."""
         try:
             # DEBUG THUMB: disabled noisy logs
             # try:
             #     self.logger.info("thumb start: row=%d lcsc=%s", row_index, lcsc)
             # except Exception:
             #     self.logger.exception("Logging thumb start failed")
-            result = self._lcsc_api.get_part_data(lcsc)
+            result = self._fetch_part_data_cached(lcsc)
             if not result or not result.get("success"):
                 raise RuntimeError("part data not found")
             data = result.get("data", {}).get("data", {})
@@ -1630,7 +1639,7 @@ class PartSelectorDialog(wx.Dialog):
             io_bytes = self._lcsc_api.download_bitmap(picture)
             if not io_bytes:
                 raise RuntimeError("download failed")
-            bmp = None
+            payload = None
             if Image is not None:
                 # Pillow path
                 img = Image.open(io_bytes)
@@ -1642,46 +1651,9 @@ class PartSelectorDialog(wx.Dialog):
                     # Fallback to contain
                     img.thumbnail((width, height), Image.LANCZOS)
                 w, h = img.size
-                buf = img.tobytes()  # RGBA
-                try:
-                    image = wx.Image(w, h)
-                    # Split RGBA to RGB + Alpha for wx.Image
-                    rgb = bytearray()
-                    alpha = bytearray()
-                    for i in range(0, len(buf), 4):
-                        r, g, b, a = buf[i : i + 4]
-                        rgb.extend((r, g, b))
-                        alpha.append(a)
-                    image.SetData(bytes(rgb))
-                    image.SetAlpha(bytes(alpha))
-                    bmp = wx.Bitmap(image)
-                except Exception:
-                    try:
-                        bmp = wx.Bitmap.FromBufferRGBA(w, h, buf)
-                    except Exception:
-                        bmp = None
-            if bmp is None:
-                # Fallback to wx.Image decode (use LoadStream to avoid type issues)
-                try:
-                    io_bytes.seek(0)
-                    image = wx.Image()
-                    ok = image.LoadStream(io_bytes)
-                    if not ok or not image.IsOk():
-                        raise RuntimeError("Decode failed")
-                    image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
-                    bmp = wx.Bitmap(image)
-                except Exception as exc:
-                    # Last resort placeholder to avoid empty cell
-                    self.logger.warning(
-                        "thumb failed: row=%d lcsc=%s url=%s err=%s",
-                        row_index,
-                        lcsc,
-                        locals().get('picture', None),
-                        exc,
-                    )
-                    image = wx.Image(width, height)
-                    image.SetRGBRect(wx.Rect(0, 0, width, height), 240, 240, 240)
-                    bmp = wx.Bitmap(image)
+                payload = ("rgba", w, h, img.tobytes())
+            if payload is None:
+                payload = ("encoded", width, height, io_bytes.getvalue())
                    
         except Exception as exc:  # noqa: BLE001
             # Mark as attempted to avoid retry storms
@@ -1703,9 +1675,10 @@ class PartSelectorDialog(wx.Dialog):
         # Update UI on main thread
         def _apply():
             # Discard if a newer search repopulated the model
-            if generation != self._search_generation:
+            if self._destroying or generation != self._search_generation:
                 return
             try:
+                bmp = self._bitmap_from_thumbnail_payload(payload)
                 with self._thumb_lock:
                     self._thumb_cache[lcsc] = bmp
                     self._thumb_scheduled.discard(lcsc)
@@ -1721,3 +1694,37 @@ class PartSelectorDialog(wx.Dialog):
                     self._thumb_scheduled.discard(lcsc)
                 self.logger.exception("Failed to apply thumbnail to model/UI")
         wx.CallAfter(_apply)
+
+    @staticmethod
+    def _bitmap_from_thumbnail_payload(payload):
+        """Create the wx bitmap on the GUI thread."""
+
+        kind, width, height, data = payload
+        if kind == "rgba":
+            return wx.Bitmap.FromBufferRGBA(width, height, data)
+        image = wx.Image(io.BytesIO(data), wx.BITMAP_TYPE_ANY)
+        if not image.IsOk():
+            raise RuntimeError("Thumbnail decode failed")
+        image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
+        return wx.Bitmap(image)
+
+    def Destroy(self):  # noqa: N802 - wx override
+        """Stop background work before destroying the dialog."""
+
+        if self._destroying:
+            return False
+        self._destroying = True
+        self._search_generation += 1
+        self._details_generation += 1
+        for timer_name in ("search_timer", "_scroll_timer", "_import_status_timer"):
+            try:
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    timer.Stop()
+            except Exception:
+                pass
+        try:
+            self._thumb_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        return super().Destroy()

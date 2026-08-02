@@ -20,6 +20,8 @@ from ..core.helpers import (
     loadBitmapScaled,
     GetScaleFactor,
     PLUGIN_PATH,
+    sanitize_lib_name,
+    as_bool,
     apply_button_label_tooltips,
 )
 from ..core.events import (
@@ -157,6 +159,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         self.pcbnew = (kicad_provider or KicadProvider()).get_pcbnew()
         self.window = self  # fallback until wx top-level is available
         self.scale_factor = 1.0
+        self._library_rename_timer = None
+        self._pending_library_rename = None
 
         # Project context
         try:
@@ -349,17 +353,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         # Ensure UI matches current deps state
         self._update_select_enabled()
 
-        # Trigger initial DB download if missing and disable search UI until ready
-        try:
-            if getattr(self.library, "state", None) == LibraryState.UPDATE_NEEDED:
-                self.log("Parts database not found. Starting initial download...\n")
-                try:
-                    self.set_db_ready(False)
-                except Exception:
-                    pass
-                self.library.update()
-        except Exception:
-            pass
         self._start_symbol_index_warmup()
 
     def _resolve_python_exe(self) -> str:
@@ -411,30 +404,14 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             return subprocess.list2cmdline(cmd)
         return " ".join(shlex.quote(str(part)) for part in cmd)
 
-    @staticmethod
-    def _as_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
-
     def _start_symbol_index_warmup(self, force: bool = False) -> None:
         general = (self.settings.get("general", {}) or {})
         lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
         if lib_format != "kicad":
             return
-        if not self._as_bool(general.get("kicad_builtin_first"), default=True):
+        if not as_bool(general.get("kicad_builtin_first"), default=True):
             return
-        if not self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
+        if not as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
             return
         if self._symbol_index_warmup_running:
             if force:
@@ -615,10 +592,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             btn.Enable(False)
 
         importer = self._make_importer(scope)
+        self._batch_import_running = True
+        wx.BeginBusyCursor()
 
         def _worker():
-            wx.BeginBusyCursor()
-            self._batch_import_running = True
             ok_count = 0
             total = len(normalized_rows)
             try:
@@ -671,7 +648,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 wx.CallAfter(self.show_import_status, ok_count, failed_count)
             finally:
                 self._batch_import_running = False
-                wx.EndBusyCursor()
+                wx.CallAfter(wx.EndBusyCursor)
                 try:
                     wx.CallAfter(self.gauge.SetValue, 0)
                 except Exception:
@@ -694,16 +671,16 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             btn.Enable(False)
 
         importer = self._make_importer(scope)
+        wx.BeginBusyCursor()
 
         def _worker():
-            wx.BeginBusyCursor()
             try:
                 ok, lib_base = importer.import_part(lcsc_id=lcsc_id)
             except Exception as e:
                 wx.PostEvent(self, LogboxAppendEvent(msg=f"{e}\n"))
                 ok, lib_base = False, self.project_path
             finally:
-                wx.EndBusyCursor()
+                wx.CallAfter(wx.EndBusyCursor)
             
             if btn is not None:
                 wx.CallAfter(btn.Enable, True)
@@ -829,45 +806,87 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         return project_dir, board_name, schematic_name
 
     # Settings persistence
-    # Plugin-level settings are stored in one shared file under plugin directory.
+    # Project-level settings live under the current KiCad project directory.
 
     @property
-    def _plugin_settings_path(self) -> str:
-        """Return path to plugin-level settings file."""
-        return os.path.join(PLUGIN_PATH, "jlcpcb_importer.json")
+    def _project_settings_path(self) -> str:
+        """Return path to project-level settings file."""
+        return os.path.join(self.project_path, "jlcpcb_importer.json")
+
+    @staticmethod
+    def _merge_settings(base: dict, override: dict) -> dict:
+        """Return settings with nested dict values from override applied to base."""
+        result = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = AssignLCSCMainDialog._merge_settings(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    @staticmethod
+    def _read_json_file(path: str) -> dict:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     def _load_settings(self):
-        # 1) Plugin-level persisted settings
-        try:
-            with open(self._plugin_settings_path, encoding="utf-8") as f:
-                self.settings = json.load(f)
-                return
-        except Exception:
-            pass
-        # 2) Plugin defaults
-        try:
-            with open(os.path.join(PLUGIN_PATH, "settings.default.json"), encoding="utf-8") as f:
-                self.settings = json.load(f)
-                return
-        except Exception:
-            pass
-        self.settings = {}
+        # 1) Plugin defaults
+        defaults = self._read_json_file(os.path.join(PLUGIN_PATH, "settings.default.json"))
+        # 2) Project-level persisted settings
+        project_settings = self._read_json_file(self._project_settings_path)
+        self.settings = self._merge_settings(defaults, project_settings)
 
     def _save_settings(self):
         try:
-            with open(self._plugin_settings_path, "w", encoding="utf-8") as f:
+            settings_path = Path(self._project_settings_path)
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=2)
+            try:
+                self.log(f"Settings saved: {settings_path}\n")
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                self.log("Settings save failed.\n")
+            except Exception:
+                pass
 
     # Called when PartSelectorDialog posts UpdateSetting
     def _on_update_setting(self, e):
+        old_lib_prefix = ""
+        if e.section == "general" and e.setting == "lib_prefix":
+            old_lib_prefix = str(getattr(e, "previous_value", "") or "").strip()
+            if not old_lib_prefix:
+                try:
+                    from ..core.lib_paths import resolve_library_base_name
+                    old_lib_prefix = resolve_library_base_name(
+                        self.settings.get("general", {}) or {},
+                        project_path=Path(self.project_path),
+                    )
+                except Exception:
+                    old_lib_prefix = str((self.settings.get("general", {}) or {}).get("lib_prefix") or "").strip()
+        try:
+            if e.section == "general" and e.setting in ("lib_prefix", "lib_path", "lib_format", "library_scope"):
+                self.log(
+                    f"UpdateSetting: {e.section}.{e.setting}={getattr(e, 'value', None)!r}"
+                    + (f" old_lib_prefix={old_lib_prefix!r}" if e.setting == "lib_prefix" else "")
+                    + "\n"
+                )
+        except Exception:
+            pass
         if e.section not in self.settings:
             self.settings[e.section] = {}
         self.settings[e.section][e.setting] = e.value
         self._save_settings()
-        if e.setting in ("library_scope", "lib_path", "lib_prefix"):
+        if e.setting in ("library_scope", "lib_path", "lib_prefix", "lib_format"):
             self._sync_shared_meta(changed_setting=e.setting)
+        if e.section == "general" and e.setting == "lib_prefix":
+            self._schedule_library_rename_prompt(old_lib_prefix, str(e.value or "").strip())
         if e.setting == "library_scope":
             self._update_mode_status()
         if e.section == "general" and e.setting in (
@@ -887,6 +906,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         try:
             general = (self.settings.get("general", {}) or {})
             if str(general.get("library_scope", "project")).strip().lower() != "shared":
+                self.log(f"Shared metadata sync skipped: scope={general.get('library_scope', 'project')!r}\n")
                 return
             from ..core.lib_paths import resolve_lib_root, resolve_library_base_name
             from ..core.lib_tables import LibTablesManager
@@ -899,6 +919,11 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             shared_root, shared_uri_prefix = resolve_lib_root(general, Path(self.project_path))
             default_name = resolve_library_base_name(general, project_path=Path(self.project_path))
             override_name = str(general.get("lib_prefix") or "").strip() if changed_setting == "lib_prefix" else None
+            self.log(
+                "Shared metadata sync: "
+                f"changed={changed_setting!r} root={shared_root} uri_prefix={shared_uri_prefix!r} "
+                f"default_name={default_name!r} override_name={override_name!r}\n"
+            )
             ensure_shared_meta(
                 shared_root,
                 default_name,
@@ -911,6 +936,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 shared_root,
                 use_project_relative=False,
                 uri_prefix=shared_uri_prefix,
+                lib_format=str(general.get("lib_format", "easyeda_pro")).strip().lower(),
             )
             ensure_project_table_links(
                 Path(self.project_path),
@@ -924,6 +950,232 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             )
         except Exception as exc:
             self.log(f"Shared metadata sync failed: {exc}\n")
+
+    def _schedule_library_rename_prompt(self, old_name: str, new_name: str) -> None:
+        raw_old_name = old_name
+        raw_new_name = new_name
+        old_name = sanitize_lib_name(str(old_name or "").strip())
+        new_name = sanitize_lib_name(str(new_name or "").strip())
+        self.log(
+            f"Library rename schedule: raw_old={raw_old_name!r} raw_new={raw_new_name!r} "
+            f"old={old_name!r} new={new_name!r}\n"
+        )
+        if not old_name or not new_name or old_name == new_name:
+            self.log("Library rename schedule skipped: empty or unchanged name.\n")
+            return
+        general = dict((self.settings.get("general", {}) or {}))
+        if str(general.get("library_scope", "project")).strip().lower() == "system":
+            self.log("Library rename schedule skipped: system scope.\n")
+            return
+        self._pending_library_rename = {
+            "old_name": old_name,
+            "new_name": new_name,
+            "general": general,
+        }
+        try:
+            if self._library_rename_timer is not None:
+                self._library_rename_timer.Stop()
+        except Exception:
+            pass
+        self._library_rename_timer = wx.CallLater(900, self._maybe_prompt_library_rename)
+        self.log("Library rename prompt scheduled.\n")
+
+    def _library_rename_pairs(self, lib_root: Path, old_name: str, new_name: str) -> list[tuple[Path, Path, str, str]]:
+        grouped = False
+        try:
+            from ..core.lib_paths import resolve_group_by_category
+            grouped = resolve_group_by_category(self.settings.get("general", {}) or {}, default=False)
+        except Exception:
+            grouped = False
+
+        pairs: list[tuple[Path, Path, str, str]] = []
+        if grouped:
+            prefix = f"{old_name}_"
+            try:
+                for item in sorted(lib_root.iterdir()):
+                    if not item.name.startswith(prefix):
+                        continue
+                    target_name = f"{new_name}_{item.name[len(prefix):]}"
+                    pairs.append((item, lib_root / target_name, item.name, target_name))
+            except Exception:
+                pass
+        else:
+            pairs.append((lib_root / old_name, lib_root / new_name, old_name, new_name))
+            for suffix in (".elibz", ".kicad_sym", ".pretty"):
+                pairs.append((lib_root / f"{old_name}{suffix}", lib_root / f"{new_name}{suffix}", old_name, new_name))
+
+        return [(src, dst, old, new) for src, dst, old, new in pairs if src.exists() and not dst.exists()]
+
+    def _find_previous_library_names(self, lib_root: Path, new_name: str) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+
+        def _add(name: str) -> None:
+            clean = sanitize_lib_name(str(name or "").strip())
+            if not clean or clean == new_name or clean in seen:
+                return
+            seen.add(clean)
+            names.append(clean)
+
+        try:
+            from ..core.sym_lib_reader import parse_lib_table, resolve_uri
+            table_paths = [lib_root / "sym-lib-table", lib_root / "fp-lib-table"]
+            project_table_paths = [
+                Path(self.project_path) / "sym-lib-table",
+                Path(self.project_path) / "fp-lib-table",
+            ]
+            for table_path in table_paths + project_table_paths:
+                if not table_path.exists():
+                    continue
+                for _entry_name, _lib_type, uri in parse_lib_table(table_path):
+                    resolved = Path(resolve_uri(uri, Path(self.project_path), table_dir=table_path.parent))
+                    try:
+                        resolved.relative_to(lib_root.resolve())
+                    except Exception:
+                        continue
+                    stem = resolved.stem
+                    if stem and not stem.startswith(new_name):
+                        _add(stem)
+                    parent_name = resolved.parent.name
+                    if parent_name and parent_name != lib_root.name and not parent_name.startswith(new_name):
+                        _add(parent_name)
+        except Exception:
+            pass
+
+        try:
+            for item in sorted(lib_root.iterdir()):
+                if item.name.startswith(new_name):
+                    continue
+                if item.suffix in (".elibz", ".kicad_sym", ".pretty"):
+                    _add(item.stem)
+                elif item.is_dir():
+                    if (item / f"{item.name}.elibz").exists() or (item / f"{item.name}.kicad_sym").exists() or (item / f"{item.name}.pretty").exists():
+                        _add(item.name)
+        except Exception:
+            pass
+
+        return names
+
+    @staticmethod
+    def _rewrite_symbol_library_footprint_refs(sym_path: Path, old_name: str, new_name: str) -> None:
+        if not sym_path.exists() or not sym_path.is_file():
+            return
+        try:
+            text = sym_path.read_text(encoding="utf-8", errors="replace")
+            patched = text.replace(f'"{old_name}:', f'"{new_name}:')
+            if patched != text:
+                sym_path.write_text(patched, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _rename_library_artifact(self, src: Path, dst: Path, old_name: str, new_name: str) -> bool:
+        try:
+            src.rename(dst)
+        except Exception as exc:
+            self.log(f"Library rename failed: {src} -> {dst}: {exc}\n")
+            return False
+
+        if dst.is_dir():
+            for suffix in (".elibz", ".kicad_sym", ".pretty"):
+                old_child = dst / f"{old_name}{suffix}"
+                new_child = dst / f"{new_name}{suffix}"
+                if old_child.exists() and not new_child.exists():
+                    try:
+                        old_child.rename(new_child)
+                    except Exception as exc:
+                        self.log(f"Library child rename failed: {old_child} -> {new_child}: {exc}\n")
+                if suffix == ".kicad_sym":
+                    self._rewrite_symbol_library_footprint_refs(new_child, old_name, new_name)
+        elif dst.suffix == ".kicad_sym":
+            self._rewrite_symbol_library_footprint_refs(dst, old_name, new_name)
+
+        self.log(f"Renamed library artifact: {src.name} -> {dst.name}\n")
+        return True
+
+    def _refresh_library_tables_after_rename(self, lib_root: Path) -> None:
+        try:
+            from ..core.lib_paths import resolve_lib_root
+            from ..core.lib_tables import LibTablesManager
+
+            general = self.settings.get("general", {}) or {}
+            scope = str(general.get("library_scope", "project")).strip().lower()
+            fmt = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+            if scope == "shared":
+                _root, uri_prefix = resolve_lib_root(general, Path(self.project_path))
+                manager = LibTablesManager(lib_root, log=self.log)
+                manager.prune_invalid_table_paths(project_path=Path(self.project_path))
+                manager.ensure_project_lib_tables(
+                    lib_root,
+                    use_project_relative=False,
+                    uri_prefix=uri_prefix,
+                    lib_format=fmt,
+                )
+            else:
+                _root, uri_prefix = resolve_lib_root(general, Path(self.project_path))
+                manager = LibTablesManager(Path(self.project_path), log=self.log)
+                manager.prune_invalid_table_paths(project_path=Path(self.project_path))
+                manager.ensure_project_lib_tables(lib_root, uri_prefix=uri_prefix, lib_format=fmt)
+        except Exception as exc:
+            self.log(f"Library table refresh after rename failed: {exc}\n")
+
+    def _maybe_prompt_library_rename(self) -> None:
+        pending = self._pending_library_rename
+        self._pending_library_rename = None
+        if not pending:
+            return
+        old_name = str(pending.get("old_name") or "")
+        new_name = str(pending.get("new_name") or "")
+        if not old_name or not new_name or old_name == new_name:
+            return
+        try:
+            from ..core.lib_paths import resolve_lib_root
+            lib_root, _uri_prefix = resolve_lib_root(self.settings.get("general", {}) or {}, Path(self.project_path))
+        except Exception as exc:
+            self.log(f"Library rename skipped: cannot resolve library root: {exc}\n")
+            return
+        self.log(
+            f"Library rename prompt check: old={old_name!r} new={new_name!r} "
+            f"root={lib_root} exists={lib_root.exists()}\n"
+        )
+
+        pairs = self._library_rename_pairs(lib_root, old_name, new_name)
+        self.log(f"Library rename candidates for '{old_name}' -> '{new_name}': {len(pairs)}\n")
+        if not pairs:
+            alternatives = self._find_previous_library_names(lib_root, new_name)
+            self.log(f"Library rename fallback names: {alternatives}\n")
+            for candidate in alternatives:
+                pairs = self._library_rename_pairs(lib_root, candidate, new_name)
+                if pairs:
+                    old_name = candidate
+                    self.log(f"Library rename fallback selected previous name: {old_name!r}\n")
+                    break
+        if not pairs:
+            self.log(f"Library rename: no existing artifacts found for previous name '{old_name}'.\n")
+            return
+
+        sample = "\n".join(f"- {src.name} -> {dst.name}" for src, dst, _old, _new in pairs[:8])
+        more = "" if len(pairs) <= 8 else f"\n- ...and {len(pairs) - 8} more"
+        dlg = wx.MessageDialog(
+            self,
+            f"Library name changed from '{old_name}' to '{new_name}'.\n\n"
+            f"Rename existing library artifact(s)?\n\n{sample}{more}",
+            "Rename library",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        try:
+            result = dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+        if result != wx.ID_YES:
+            return
+
+        renamed = 0
+        for src, dst, old_item_name, new_item_name in pairs:
+            if self._rename_library_artifact(src, dst, old_item_name, new_item_name):
+                renamed += 1
+        if renamed:
+            self._sync_shared_meta(changed_setting="lib_prefix")
+            self._refresh_library_tables_after_rename(lib_root)
 
     def _update_mode_status(self):
         """Update the mode status label in the toolbar."""
@@ -947,7 +1199,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     def _apply_hide_button_labels_setting(self):
         general = (self.settings.get("general", {}) or {})
-        hide = self._as_bool(general.get("hide_button_labels"), default=False)
+        hide = as_bool(general.get("hide_button_labels"), default=False)
 
         # Search button (PartSelectorDialog)
         # self.apply_hide_button_labels_setting(hide)
@@ -1001,7 +1253,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             return m.group(1)
         return fp_stem
 
-    def _collect_reimport_rows(self) -> list[str]:
+    def _collect_reimport_rows(self, include_schematic: bool = False) -> list[str]:
         """Collect unique LCSC IDs from previously imported libraries."""
         import zipfile
         import json as _json
@@ -1098,12 +1350,83 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception as exc:
             self.log(f"Re-import: kicad_sym scan error: {exc}\n")
 
+        # 3. KiCad schematics — optional, because plain C123-like tokens can also
+        # be component references. Keep this limited to supplier/LCSC fields.
+        if include_schematic:
+            schematic_patterns = [
+                r'\(property\s+"[^"]*LCSC[^"]*"\s+"(C\d+)"',
+                r'\(property\s+"[^"]*Supplier[^"]*Part[^"]*"\s+"(C\d+)"',
+                r'lcsc\.com/[^"\s]*_(C\d+)\.html',
+                r'lcsc\.com/[^"\s]*/(C\d+)\.html',
+            ]
+            try:
+                schematic_files = sorted(project_path.rglob("*.kicad_sch"))
+                self.log(f"Re-import: found {len(schematic_files)} schematic file(s)\n")
+                for sch_path in schematic_files:
+                    try:
+                        count_before = len(ids)
+                        content = sch_path.read_text(encoding="utf-8", errors="replace")
+                        for pattern in schematic_patterns:
+                            for m in re.finditer(pattern, content, flags=re.IGNORECASE):
+                                _add_lcsc(m.group(1))
+                        added = len(ids) - count_before
+                        if added:
+                            self.log(f"Re-import:   schematic {sch_path.name}: {added} LCSC ID(s) found\n")
+                    except Exception as exc:
+                        self.log(f"Re-import:   ERROR reading schematic {sch_path}: {exc}\n")
+            except Exception as exc:
+                self.log(f"Re-import: schematic scan error: {exc}\n")
+
         self.log(f"Re-import: total {len(ids)} part(s) collected\n")
 
         return ids
 
+    def _ask_reimport_options_dialog(self) -> Optional[dict]:
+        dlg = wx.Dialog(
+            self,
+            title="Re-import all",
+            style=wx.DEFAULT_DIALOG_STYLE,
+        )
+        try:
+            vbox = wx.BoxSizer(wx.VERTICAL)
+            text = wx.StaticText(
+                dlg,
+                label=(
+                    "Re-import all previously imported parts using current settings.\n"
+                    "Existing symbols and footprints will be overwritten."
+                ),
+            )
+            vbox.Add(text, 0, wx.ALL | wx.EXPAND, 10)
+
+            include_schematic = wx.CheckBox(
+                dlg,
+                wx.ID_ANY,
+                "Also search LCSC IDs in schematic files",
+            )
+            include_schematic.SetValue(False)
+            vbox.Add(include_schematic, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+            buttons = dlg.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
+            if buttons is not None:
+                vbox.Add(buttons, 0, wx.EXPAND | wx.ALL, 10)
+
+            dlg.SetSizer(vbox)
+            vbox.Fit(dlg)
+            dlg.CentreOnParent()
+            if dlg.ShowModal() != wx.ID_OK:
+                return None
+            return {"include_schematic": bool(include_schematic.GetValue())}
+        finally:
+            dlg.Destroy()
+
     def _on_reimport_all(self, _evt=None):
-        lcsc_ids = self._collect_reimport_rows()
+        options = self._ask_reimport_options_dialog()
+        if options is None:
+            return
+
+        lcsc_ids = self._collect_reimport_rows(
+            include_schematic=bool(options.get("include_schematic")),
+        )
         if not lcsc_ids:
             wx.PostEvent(
                 self,
@@ -1183,13 +1506,10 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             # This prevents deleting footprints from unrelated/global libraries.
             try:
                 from ..core.lib_paths import resolve_lib_root
+                from ..core.platform_support import resolve_system_library_root
 
                 if scope == "system":
-                    third_party = (
-                        os.environ.get("KICAD10_3RD_PARTY")
-                        or os.environ.get("KICAD9_3RD_PARTY")
-                    )
-                    base_path = Path(third_party) if third_party else (Path(PLUGIN_PATH) / "libraries")
+                    base_path = resolve_system_library_root(PLUGIN_PATH)
                     plugin_folder = Path(PLUGIN_PATH).resolve().name
                     result["managed_fp_roots"] = [
                         str(_safe_resolve(base_path / "footprints" / plugin_folder))
@@ -1254,6 +1574,17 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
             except Exception as exc:
                 result["errors"].append(f"lib-table scan: {exc}")
+
+            # A shared/system library may be referenced by projects that are not
+            # discoverable from the current KiCad process. Without a complete
+            # cross-project reference index, deleting its files cannot be proven
+            # safe. Limit destructive orphan cleanup to project-owned libraries.
+            if scope != "project":
+                result["errors"].append(
+                    f"orphan file cleanup skipped for {scope} scope; only stale "
+                    "current-project lib-table entries are eligible"
+                )
+                return result
 
             # ── Step 2: orphan footprints ──
             try:
@@ -1599,11 +1930,17 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             _log_paths("orphan 3D model files to delete", stats["orphan_models"])
 
             if total == 0:
+                notice = "Nothing to clean — everything looks good."
+                if stats["errors"]:
+                    notice = (
+                        "No eligible stale entries were found.\n\n"
+                        + "\n".join(stats["errors"])
+                    )
                 wx.CallAfter(
                     wx.MessageBox,
-                    "Nothing to clean — everything looks good.",
+                    notice,
                     "Clean Library",
-                    wx.OK | wx.ICON_INFORMATION,
+                    wx.OK | (wx.ICON_WARNING if stats["errors"] else wx.ICON_INFORMATION),
                     self,
                 )
                 return
@@ -1649,6 +1986,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     # Expose update for button
     def update_library(self):
         try:
+            if not getattr(self, "_deps_ready", False):
+                self._check_and_offer_install_deps(force_prompt=True)
+                return
             if getattr(self.library, "state", None) == LibraryState.DOWNLOAD_RUNNING:
                 return
             if hasattr(self, "update_db_btn") and self.update_db_btn:
@@ -1811,7 +2151,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             general = (self.settings.get("general", {}) or {})
         except Exception:
             general = {}
-        debug_enabled = self._as_bool(general.get("debug_log"), default=False)
+        debug_enabled = as_bool(general.get("debug_log"), default=False)
         level = logging.DEBUG if debug_enabled else logging.INFO
 
         root = logging.getLogger()
@@ -1843,11 +2183,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 from Cryptodome.Cipher import AES  # noqa: F401
             except Exception:
                 missing.append("pycryptodome")
-        try:
-            import openpyxl  # noqa: F401
-        except Exception:
-            missing.append("openpyxl")
-
         if missing:
             self._deps_ready = False
             self._update_select_enabled()
@@ -1884,6 +2219,21 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
         self._deps_ready = True
         self._update_select_enabled()
+        self._maybe_start_initial_db_download()
+
+    def _maybe_start_initial_db_download(self) -> None:
+        """Start the first database download only after requests is available."""
+
+        if not getattr(self, "_deps_ready", False):
+            return
+        if getattr(self.library, "state", None) != LibraryState.UPDATE_NEEDED:
+            return
+        self.log("Parts database not found. Starting initial download...\n")
+        try:
+            self.set_db_ready(False)
+        except Exception:
+            pass
+        self.library.update()
 
     def _install_requirements_async(self, packages):
         if self._deps_installing:
@@ -1920,31 +2270,46 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         python_exe = self._resolve_python_exe()
         env = os.environ.copy()
         env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-        env.setdefault("PYTHONNOUSERSITE", "1")
-        cmd = [
-            python_exe,
-            "-m",
-            "pip",
+        install_args = [
             "install",
             "--upgrade",
+            "--prefer-binary",
+            "--no-warn-script-location",
             "--target",
             str(lib_dir),
             *packages,
         ]
-        try:
-            self.log(f"Running: {self._format_cmd(cmd)}\n")
-        except Exception:
-            pass
-        rc = self._run_and_stream(cmd, env=env)
-        if rc != 0:
+
+        def _commands():
+            commands = [[python_exe, "-m", "pip", *install_args]]
+            if sys.platform.startswith("linux"):
+                for candidate in (
+                    Path("/var/data/python/bin/pip3"),
+                    Path("/var/data/python/bin/pip"),
+                ):
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        commands.append([str(candidate), *install_args])
+            return commands
+
+        def _try_install() -> bool:
+            for cmd in _commands():
+                try:
+                    self.log(f"Running: {self._format_cmd(cmd)}\n")
+                except Exception:
+                    pass
+                if self._run_and_stream(cmd, env=env) == 0:
+                    return True
+            return False
+
+        if not _try_install():
             try:
                 self.log("pip failed, attempting ensurepip...\n")
             except Exception:
                 pass
             ensure_cmd = [python_exe, "-m", "ensurepip", "--upgrade"]
             self._run_and_stream(ensure_cmd, env=env)
-            rc = self._run_and_stream(cmd, env=env)
-        return rc == 0
+            return _try_install()
+        return True
 
     def _update_select_enabled(self):
         try:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import zipfile
 from pathlib import Path
 from typing import Dict, Optional
 
 from .helpers import strip_lcsc_suffix
+from .platform_support import find_kicad_cli
 from .sym_lib_reader import list_symbols_kicad_meta
 
 
@@ -161,20 +161,7 @@ def resolve_footprint_mod_path(pretty_dir: Path, footprint_name: str) -> Optiona
 
 
 def _find_kicad_cli() -> str:
-    cli = shutil.which("kicad-cli")
-    if cli:
-        return cli
-    # macOS app bundle is not always in PATH
-    for candidate in (
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-        "/Applications/KiCad 10.0/KiCad.app/Contents/MacOS/kicad-cli",
-        "/Applications/KiCad 9.0/KiCad.app/Contents/MacOS/kicad-cli",
-    ):
-        if Path(candidate).exists():
-            return candidate
-    raise RuntimeError(
-        "kicad-cli not found. Install KiCad or add it to PATH."
-    )
+    return find_kicad_cli()
 
 
 def convert_elibz_with_kicad_cli(elibz_path: Path, out_sym: Path, out_pretty: Path) -> None:

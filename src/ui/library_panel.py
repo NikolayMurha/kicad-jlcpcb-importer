@@ -203,7 +203,7 @@ class LibraryManagerDialog(wx.Dialog):
         general = self._general_settings()
         lib_dir, _uri_prefix = resolve_lib_root(general, Path(self.parent.project_path))
         lib_name = self._dest_lib_name(category_hint)
-        return lib_dir / f"{lib_name}.kicad_sym"
+        return lib_dir / lib_name / f"{lib_name}.kicad_sym"
 
     def _get_dest_pretty_path(self, category_hint: str = "Misc") -> Path:
         dest = self._get_dest_lib_path(category_hint)

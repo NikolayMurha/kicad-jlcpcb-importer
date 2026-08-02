@@ -7,7 +7,21 @@ from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import quote_plus
 
-import requests  # pylint: disable=import-error
+try:
+    import requests  # pylint: disable=import-error
+except ImportError:
+    requests = None
+
+
+def _require_requests():
+    """Load requests after the runtime dependency installer has run."""
+
+    global requests
+    if requests is None:
+        import requests as requests_module  # pylint: disable=import-error,import-outside-toplevel
+
+        requests = requests_module
+    return requests
 
 
 class LCSC_API:
@@ -27,12 +41,13 @@ class LCSC_API:
 
     def get_part_data(self, lcsc_number: str) -> dict:
         """Get data for a given LCSC number from the API."""
-        r = requests.get(
+        request = _require_requests()
+        r = request.get(
             f"https://cart.jlcpcb.com/shoppingCart/smtGood/getComponentDetail?componentCode={lcsc_number}",
             headers=self.headers,
             timeout=10,
         )
-        if r.status_code != requests.codes.ok:  # pylint: disable=no-member
+        if r.status_code != request.codes.ok:  # pylint: disable=no-member
             return {"success": False, "msg": "non-OK HTTP response status"}
         data = r.json()
         if not data.get("data"):
@@ -44,13 +59,14 @@ class LCSC_API:
 
     def download_bitmap(self, url: str) -> Union[io.BytesIO, None]:
         """Download a picture of the part from the API."""
-        content = requests.get(url, headers=self.headers, timeout=10).content
+        content = _require_requests().get(url, headers=self.headers, timeout=10).content
         return io.BytesIO(content)
 
     def download_datasheet(self, url: str, path: Path):
         """Download and save a datasheet from the API."""
-        r = requests.get(url, stream=True, headers=self.headers, timeout=10)
-        if r.status_code != requests.codes.ok:  # pylint: disable=no-member
+        request = _require_requests()
+        r = request.get(url, stream=True, headers=self.headers, timeout=10)
+        if r.status_code != request.codes.ok:  # pylint: disable=no-member
             return {"success": False, "msg": "non-OK HTTP response status"}
         if not r:
             return {"success": False, "msg": "Failed to download datasheet!"}
@@ -60,7 +76,7 @@ class LCSC_API:
 
     def easyeda_search_by_codes(self, codes: list[str]) -> dict:
         """Search EasyEDA devices by LCSC codes."""
-        r = requests.post(
+        r = _require_requests().post(
             f"{self.EASYEDA_API_V2_BASE}/devices/searchByCodes",
             data={"codes[]": codes},
             headers=self.headers,
@@ -71,7 +87,7 @@ class LCSC_API:
 
     def easyeda_get_device(self, dev_uuid: str) -> dict:
         """Fetch EasyEDA device details by UUID."""
-        r = requests.get(
+        r = _require_requests().get(
             f"{self.EASYEDA_API_BASE}/devices/{dev_uuid}",
             headers=self.headers,
             timeout=10,
@@ -81,7 +97,7 @@ class LCSC_API:
 
     def easyeda_get_component(self, component_uuid: str) -> dict:
         """Fetch EasyEDA component details by UUID."""
-        r = requests.get(
+        r = _require_requests().get(
             f"{self.EASYEDA_API_V2_BASE}/components/{component_uuid}",
             headers=self.headers,
             timeout=10,
@@ -104,7 +120,7 @@ class LCSC_API:
         return url
 
     def _download_file(self, url: str, dest: Union[str, Path], timeout: int = 60) -> None:
-        r = requests.get(url, stream=True, headers=self.headers, timeout=timeout)
+        r = _require_requests().get(url, stream=True, headers=self.headers, timeout=timeout)
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):

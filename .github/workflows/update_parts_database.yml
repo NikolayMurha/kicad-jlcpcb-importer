@@ -36,7 +36,7 @@ jobs:
           python3 -c "import sqlite3; import pprint; db = sqlite3.connect(':memory:'); cursor = db.execute('PRAGMA COMPILE_OPTIONS'); pprint.pprint(cursor.fetchall())"
       - name: Install python dependencies
         run: |
-          pip install humanize
+          pip install humanize click
       - name: Update database
         run: |
           set -x

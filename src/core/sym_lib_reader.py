@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .helpers import strip_lcsc_suffix
+from ..ui.footprint_editor import FootprintEditor
 
 # ---------------------------------------------------------------------------
 # KiCad path variable resolution
@@ -909,7 +910,7 @@ def copy_footprint_to_pretty(
         if not src.exists():
             continue
         dest_pretty.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest_pretty / f"{fp_name}.kicad_mod")
+        FootprintEditor.copy_preserving_models_if_missing(src, dest_pretty / f"{fp_name}.kicad_mod")
         return True
     return False
 

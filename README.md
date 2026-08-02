@@ -5,7 +5,9 @@
 Thanks and credit to the original project that inspired this work:
 [Bouni/bouni-kicad-repository](https://github.com/Bouni/bouni-kicad-repository)
 
-- Tested with KiCad 9
+- Supported platforms: Linux and macOS
+- Supported KiCad versions: KiCad 9 and newer
+- Windows is currently outside the supported and tested platform matrix.
 
 What it does
 
@@ -81,13 +83,6 @@ From there you can install the plugin via the GUI.
 
 Simply clone this repo into your `scripting/plugins` folder.
 
-#### Windows
-
-```sh
-cd C:\users\{username}\Documents\kicad\{version}\scripting\plugins\
-git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
-```
-
 #### Linux
 
 ```sh
@@ -98,20 +93,23 @@ git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 #### macOS
 
 ```sh
-cd ~/Library/Preferences/kicad/scripting/plugins
+cd ~/Documents/KiCad/{version}/scripting/plugins
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
 You may need to create the `scripting/plugins` folder if it does not exist.
 
-### Flatpack :warning:
+### Flatpak :warning:
 
-The Flatpak installation of KiCAD currently dows not ship with pip and requests installed. The later is required for the plugin to work.
-In order to get it working you can run the following 3 commands:
+The Flatpak installation of KiCad may not provide `pip`. The plugin first tries
+its automatic dependency installer, including the Flatpak user Python location.
+If that fails, run:
 
 1. `flatpak run --command=sh org.kicad.KiCad`
 2. `python -m ensurepip --upgrade`
-3. `/var/data/python/bin/pip3 install requests`
+3. `/var/data/python/bin/pip3 install --target ~/.local/share/kicad/9.0/scripting/plugins/kicad-jlcpcb-importer/lib requests pycryptodome`
+
+Adjust the KiCad version and plugin directory name in step 3 when necessary.
 
 ## Usage 🥳
 
@@ -134,11 +132,6 @@ When you choose System as the storage location, generated libraries are placed u
   - `~/.local/share/kicad/9.0/3rdparty/symbols/{plugin_dir_name}`
   - `~/.local/share/kicad/9.0/3rdparty/footprints/{plugin_dir_name}`
   - `~/.local/share/kicad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
-
-- Windows
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\symbols\{plugin_dir_name}`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\footprints\{plugin_dir_name}`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\3dmodels\{plugin_dir_name}`
 
 ## Icons
 
@@ -208,7 +201,6 @@ The `{KiCad python}` should be used, this can be found at different locations de
 |---|---|
 |Mac| /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 |
 |Linux| /usr/bin/python3 |
-|Windows | C:\Program Files\KiCad\8.0\bin\python.exe |
 
 #### Working directory
 
@@ -218,10 +210,9 @@ The `{working directory}` should be your plugins directory, ie:
 |---|---|
 |Mac| ~/Documents/KiCad/{version}/scripting/plugins/ |
 |Linux| ~/.local/share/kicad/{version}/scripting/plugins/ |
-|Windows| %USERPROFILE%\Documents\KiCad\{version}\scripting\plugins\ |
 
 > [!NOTE]  
-> `{version}` can be 7.0, 8.0, or X.YY depending on the version you use
+> `{version}` is 9.0 or newer.
 
 #### Plugin folder name
 
@@ -255,12 +246,6 @@ For example on Linux:
 
 ```sh
 cd ~/.local/share/kicad/8.0/scripting/plugins/ && python -m kicad-jlcpcb-importer
-```
-
-For example on Windows:
-
-```cmd
-& 'C:\Program Files\KiCad\8.0\bin\python.exe' -m kicad-jlcpcb-importer
 ```
 
 #### IDE

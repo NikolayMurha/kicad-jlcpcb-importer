@@ -10,7 +10,10 @@ from threading import Thread
 import time
 from typing import NamedTuple, Optional
 
-import requests  # pylint: disable=import-error
+try:
+    import requests  # pylint: disable=import-error
+except ImportError:
+    requests = None
 import wx  # pylint: disable=import-error
 
 from .events import (
@@ -20,7 +23,19 @@ from .events import (
     MessageEvent,
 )
 from .helpers import PLUGIN_PATH, dict_factory, natural_sort_collation
+from .part_search import SEARCH_COLUMNS, build_parts_search_query
 from ..importers.unzip_parts import unzip_parts
+
+
+def _require_requests():
+    """Load requests after the runtime dependency installer has run."""
+
+    global requests
+    if requests is None:
+        import requests as requests_module  # pylint: disable=import-error,import-outside-toplevel
+
+        requests = requests_module
+    return requests
 
 
 class PartsDatabaseInfo(NamedTuple):
@@ -178,126 +193,18 @@ class Library:
 
     def search(self, parameters):
         """Search the database for parts that meet the given parameters."""
-
-        # skip searching if there are no keywords and the part number
-        # field is empty as there are too many parts for the search
-        # to reasonbly show the desired part
-        if parameters["keyword"] == "" and (
-            "part_no" not in parameters or parameters["part_no"] == ""
-        ):
+        query, values = build_parts_search_query(
+            parameters, self.order_by, self.order_dir
+        )
+        if not query:
             return []
 
-        # Note: this must mach the widget order in PartSelectorDialog init and
-        # populate_part_list in parselector.py
-        columns = [
-            "LCSC Part",
-            "MFR.Part",
-            "Package",
-            "Solder Joint",
-            "Library Type",
-            "Stock",
-            "Manufacturer",
-            "Description",
-            "Price",
-            "First Category",
-            "Attributes",
-        ]
-        s = ",".join(f'"{c}"' for c in columns)
-        query = f"SELECT {s} FROM parts WHERE "
-
-        match_chunks = []
-        like_chunks = []
-
-        query_chunks = []
-
-        # Build 'match_chunks' and 'like_chunks' arrays
-        #
-        # FTS5 (https://www.sqlite.org/fts5.html) has a substring limit of
-        # at least 3 characters.
-        # 'Substrings consisting of fewer than 3 unicode characters do not
-        #  match any rows when used with a full-text query'
-        #
-        # However, they will still match with a LIKE.
-        #
-        # So extract out the <3 character strings and add a 'LIKE' term
-        # for each of those.
-        if parameters["keyword"] != "":
-            keywords = parameters["keyword"].split(" ")
-            match_keywords_intermediate = []
-            for w in keywords:
-                # skip over empty keywords
-                if w != "":
-                    if len(w) < 3:  # LIKE entry
-                        kw = f"description LIKE '%{w}%'"
-                        like_chunks.append(kw)
-                    else:  # MATCH entry
-                        kw = f'"{w}"'
-                        match_keywords_intermediate.append(kw)
-            if match_keywords_intermediate:
-                match_entry = " AND ".join(match_keywords_intermediate)
-                match_chunks.append(f"{match_entry}")
-
-        if "manufacturer" in parameters and parameters["manufacturer"] != "":
-            p = parameters["manufacturer"]
-            match_chunks.append(f'"Manufacturer":"{p}"')
-        if "package" in parameters and parameters["package"] != "":
-            p = parameters["package"]
-            match_chunks.append(f'"Package":"{p}"')
-        if (
-            "category" in parameters
-            and parameters["category"] != ""
-            and parameters["category"] != "All"
-        ):
-            p = parameters["category"]
-            match_chunks.append(f'"First Category":"{p}"')
-        if "subcategory" in parameters and parameters["subcategory"] != "":
-            p = parameters["subcategory"]
-            match_chunks.append(f'"Second Category":"{p}"')
-        if "part_no" in parameters and parameters["part_no"] != "":
-            p = parameters["part_no"]
-            match_chunks.append(f'"MFR.Part":"{p}"')
-        if "solder_joints" in parameters and parameters["solder_joints"] != "":
-            p = parameters["solder_joints"]
-            match_chunks.append(f'"Solder Joint":"{p}"')
-
-        library_types = []
-        if parameters["basic"]:
-            library_types.append('"Basic"')
-        if parameters["extended"]:
-            library_types.append('"Extended"')
-        if library_types:
-            query_chunks.append(f'"Library Type" IN ({",".join(library_types)})')
-
-        if parameters["stock"]:
-            query_chunks.append('"Stock" > "0"')
-
-        if not match_chunks and not like_chunks and not query_chunks:
-            return []
-
-        if match_chunks:
-            query += "parts MATCH '"
-            query += " AND ".join(match_chunks)
-            query += "'"
-
-        if like_chunks:
-            if match_chunks:
-                query += " AND "
-            query += " AND ".join(like_chunks)
-
-        if query_chunks:
-            if match_chunks or like_chunks:
-                query += " AND "
-            query += " AND ".join(query_chunks)
-
-        query += f' ORDER BY "{self.order_by}" COLLATE naturalsort {self.order_dir}'
-        query += " LIMIT 1000"
-
-        self.logger.debug("query '%s'", query)
+        self.logger.debug("query '%s' values=%r", query, values)
 
         with contextlib.closing(sqlite3.connect(self.partsdb_file)) as con:
             con.create_collation("naturalsort", natural_sort_collation)
             with con as cur:
-                return cur.execute(query).fetchall()
+                return cur.execute(query, values).fetchall()
 
     def search_by_lcsc_ids(self, ids: list) -> list:
         """Return parts whose 'LCSC Part' value is in *ids*.
@@ -307,20 +214,7 @@ class Library:
         """
         if not ids:
             return []
-        columns = [
-            "LCSC Part",
-            "MFR.Part",
-            "Package",
-            "Solder Joint",
-            "Library Type",
-            "Stock",
-            "Manufacturer",
-            "Description",
-            "Price",
-            "First Category",
-            "Attributes",
-        ]
-        s = ",".join(f'"{c}"' for c in columns)
+        s = ",".join(f'"{c}"' for c in SEARCH_COLUMNS)
         placeholders = ",".join("?" for _ in ids)
         query = (
             f'SELECT {s} FROM parts WHERE "LCSC Part" IN ({placeholders})'
@@ -503,11 +397,14 @@ class Library:
 
     def update(self):
         """Update the sqlite parts database from the JLCPCB CSV."""
+        if self.state == LibraryState.DOWNLOAD_RUNNING:
+            return
+        self.state = LibraryState.DOWNLOAD_RUNNING
         Thread(target=self.download).start()
 
     def download(self):
         """Actual worker thread that downloads and imports the parts data."""
-        self.state = LibraryState.DOWNLOAD_RUNNING
+        request = _require_requests()
         start = time.time()
         wx.PostEvent(self.parent, DownloadStartedEvent())
 
@@ -526,10 +423,10 @@ class Library:
 
         # Get the total number of chunks to download
         try:
-            r = requests.get(
+            r = request.get(
                 url_stub + cnt_file, allow_redirects=True, stream=True, timeout=300
             )
-            if r.status_code != requests.codes.ok:
+            if r.status_code != request.codes.ok:
                 wx.PostEvent(
                     self.parent,
                     MessageEvent(
@@ -568,7 +465,7 @@ class Library:
                     # Validate the size of the chunk file
                     try:
                         expected_size = int(
-                            requests.head(
+                            request.head(
                                 url_stub + chunk_file, timeout=300
                             ).headers.get("Content-Length", 0)
                         )
@@ -598,13 +495,13 @@ class Library:
             # Download the chunk
             try:
                 with open(chunk_path, "wb") as f:
-                    r = requests.get(
+                    r = request.get(
                         url_stub + chunk_file,
                         allow_redirects=True,
                         stream=True,
                         timeout=300,
                     )
-                    if r.status_code != requests.codes.ok:
+                    if r.status_code != request.codes.ok:
                         wx.PostEvent(
                             self.parent,
                             MessageEvent(

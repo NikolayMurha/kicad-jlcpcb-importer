@@ -7,15 +7,25 @@ on:  # yamllint disable-line rule:truthy
   pull_request:
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Set up KiCad-compatible Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
       - name: Install dependencies
-        run: pip install pytest humanize
-      - name: Run db_build tests
-        working-directory: db_build
-        run: pytest jlcparts_db_convert.py
-      - name: Run core tests
-        working-directory: core
-        run: pytest version.py
+        run: pip install humanize click
+      - name: Run database and core tests
+        run: |
+          python -m unittest discover -s db_build/tests -p 'test_*.py'
+          python -m unittest \
+            src.core.test_price \
+            src.core.test_part_search \
+            src.core.test_platform_support \
+            src.importers.test_unzip_parts

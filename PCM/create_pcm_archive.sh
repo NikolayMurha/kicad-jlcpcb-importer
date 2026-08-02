@@ -1,57 +1,67 @@
 #!/bin/sh
 
+set -eu
+
 # heavily inspired by https://github.com/4ms/4ms-kicad-lib/blob/master/PCM/make_archive.sh
 
-VERSION=$1
+VERSION=${1:?usage: create_pcm_archive.sh VERSION}
+ARCHIVE_ROOT="PCM/archive"
+PLUGIN_ROOT="$ARCHIVE_ROOT/plugins"
+RESOURCE_ROOT="$ARCHIVE_ROOT/resources"
 
 echo "Clean up old files"
 rm -f PCM/*.zip
-rm -rf PCM/archive
+rm -rf "$ARCHIVE_ROOT"
 
 
 echo "Create folder structure for ZIP"
-mkdir -p PCM/archive/plugins
-mkdir -p PCM/archive/resources
+mkdir -p "$PLUGIN_ROOT"
+mkdir -p "$RESOURCE_ROOT"
 
 echo "Copy files to destination"
-cp VERSION PCM/archive/plugins
-cp *.py PCM/archive/plugins
-cp *.png PCM/archive/plugins
-cp requirements.txt PCM/archive/plugins
-cp settings.default.json PCM/archive/plugins/settings.json
-cp -r icons PCM/archive/plugins
-cp -r lib PCM/archive/plugins
-mkdir PCM/archive/plugins/core
-cp core/*.py PCM/archive/plugins/core
+cp VERSION "$PLUGIN_ROOT"
+cp ./*.py "$PLUGIN_ROOT"
+cp requirements.txt "$PLUGIN_ROOT"
+cp settings.default.json "$PLUGIN_ROOT/settings.default.json"
+cp -R src icons images "$PLUGIN_ROOT"
+mkdir -p "$PLUGIN_ROOT/lib"
+find "$PLUGIN_ROOT" -type f \( -name '*.pyc' -o -name '.DS_Store' -o -name 'test_*.py' -o -name 'pytest.ini' \) -delete
+find "$PLUGIN_ROOT" -depth -type d -name '__pycache__' -empty -delete
 # Include an icon in the PCM archive resources. Prefer PCM/icon.png; fall back to PCM/jlcpcb.png.
 if [ -f PCM/icon.png ]; then
-  cp PCM/icon.png PCM/archive/resources/icon.png
+  cp PCM/icon.png "$RESOURCE_ROOT/icon.png"
 elif [ -f PCM/jlcpcb.png ]; then
-  cp PCM/jlcpcb.png PCM/archive/resources/icon.png
+  cp PCM/jlcpcb.png "$RESOURCE_ROOT/icon.png"
 else
   echo "Warning: no icon found in PCM/ (expected icon.png or jlcpcb.png)" >&2
 fi
-cp PCM/metadata.template.json PCM/archive/metadata.json
+cp PCM/metadata.template.json "$ARCHIVE_ROOT/metadata.json"
 
 echo "Write version info to file"
-echo $VERSION > PCM/archive/plugins/VERSION
+printf '%s\n' "$VERSION" > "$PLUGIN_ROOT/VERSION"
 
 echo "Modify archive metadata.json"
-sed -i "s/VERSION_HERE/$VERSION/g" PCM/archive/metadata.json
-sed -i "s/\"kicad_version\": \"6.0\",/\"kicad_version\": \"6.0\"/g" PCM/archive/metadata.json
-sed -i "/SHA256_HERE/d" PCM/archive/metadata.json
-sed -i "/DOWNLOAD_SIZE_HERE/d" PCM/archive/metadata.json
-sed -i "/DOWNLOAD_URL_HERE/d" PCM/archive/metadata.json
-sed -i "/INSTALL_SIZE_HERE/d" PCM/archive/metadata.json
+metadata_tmp="$ARCHIVE_ROOT/metadata.json.tmp"
+sed \
+  -e "s|VERSION_HERE|$VERSION|g" \
+  -e 's/"kicad_version": "9.0",/"kicad_version": "9.0"/g' \
+  -e '/SHA256_HERE/d' \
+  -e '/DOWNLOAD_SIZE_HERE/d' \
+  -e '/DOWNLOAD_URL_HERE/d' \
+  -e '/INSTALL_SIZE_HERE/d' \
+  "$ARCHIVE_ROOT/metadata.json" > "$metadata_tmp"
+mv "$metadata_tmp" "$ARCHIVE_ROOT/metadata.json"
 
 echo "Zip PCM archive"
-cd PCM/archive
-zip -r ../KiCAD-PCM-$VERSION.zip .
+cd "$ARCHIVE_ROOT"
+zip -r "../KiCAD-PCM-$VERSION.zip" .
 cd ../..
 
 echo "Gather data for repo rebuild"
-echo VERSION=$VERSION >> $GITHUB_ENV
-echo DOWNLOAD_SHA256=$(shasum --algorithm 256 PCM/KiCAD-PCM-$VERSION.zip | xargs | cut -d' ' -f1) >> $GITHUB_ENV
-echo DOWNLOAD_SIZE=$(ls -l PCM/KiCAD-PCM-$VERSION.zip | xargs | cut -d' ' -f5) >> $GITHUB_ENV
-echo DOWNLOAD_URL="https:\/\/github.com\/NikolayMurha\/kicad-jlcpcb-importer\/releases\/download\/$VERSION\/KiCAD-PCM-$VERSION.zip" >> $GITHUB_ENV
-echo INSTALL_SIZE=$(unzip -l PCM/KiCAD-PCM-$VERSION.zip | tail -1 | xargs | cut -d' ' -f1) >> $GITHUB_ENV
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+  echo "DOWNLOAD_SHA256=$(shasum --algorithm 256 "PCM/KiCAD-PCM-$VERSION.zip" | xargs | cut -d' ' -f1)" >> "$GITHUB_ENV"
+  echo "DOWNLOAD_SIZE=$(wc -c < "PCM/KiCAD-PCM-$VERSION.zip" | xargs)" >> "$GITHUB_ENV"
+  echo "DOWNLOAD_URL=https:\/\/github.com\/NikolayMurha\/kicad-jlcpcb-importer\/releases\/download\/$VERSION\/KiCAD-PCM-$VERSION.zip" >> "$GITHUB_ENV"
+  echo "INSTALL_SIZE=$(unzip -l "PCM/KiCAD-PCM-$VERSION.zip" | tail -1 | xargs | cut -d' ' -f1)" >> "$GITHUB_ENV"
+fi

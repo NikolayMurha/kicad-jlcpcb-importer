@@ -65,8 +65,8 @@ def ensure_shared_meta(
 def ensure_project_table_links(project_dir: Path, shared_root: Path, log: Optional[Callable[[str], None]] = None) -> None:
     """Create project symlinks to shared `sym-lib-table` / `fp-lib-table`.
 
-    Falls back to file copy if symlink creation is unavailable (common on Windows
-    without Developer Mode/admin privileges).
+    Falls back to file copy if symlink creation is unavailable because of
+    filesystem, sandbox, or permission restrictions.
     """
     project_dir = Path(project_dir).resolve()
     shared_root = Path(shared_root).resolve()
@@ -124,7 +124,7 @@ def ensure_project_table_links(project_dir: Path, shared_root: Path, log: Option
             _log(
                 log,
                 "Symlink creation failed; copied table file instead. "
-                "On Windows this usually requires Developer Mode or admin rights.\n",
+                "Check filesystem and sandbox permissions if live linking is required.\n",
             )
             _log(log, f"Details: {exc}\n")
             shutil.copy2(src, dst)
@@ -178,6 +178,6 @@ def ensure_project_legacy_models_link(
         _log(
             log,
             "Legacy models symlink creation failed. "
-            "On Windows this may require Developer Mode or administrator rights.\n",
+            "Check filesystem and sandbox permissions.\n",
         )
         _log(log, f"Details: {exc}\n")

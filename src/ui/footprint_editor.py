@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Optional, Callable
 
 
@@ -25,6 +26,93 @@ class FootprintEditor:
                 print(f"[FootprintEditor] {msg}")
         except Exception:
             pass
+
+    @staticmethod
+    def _model_block_spans(text: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        idx = 0
+        while True:
+            start = text.find("(model ", idx)
+            if start == -1:
+                break
+            depth = 0
+            end = -1
+            i = start
+            while i < len(text):
+                ch = text[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+                i += 1
+            if end == -1:
+                break
+            spans.append((start, end))
+            idx = end
+        return spans
+
+    @classmethod
+    def _model_blocks(cls, text: str) -> list[str]:
+        return [text[s:e] for s, e in cls._model_block_spans(text)]
+
+    @classmethod
+    def _has_model_blocks(cls, text: str) -> bool:
+        return bool(cls._model_block_spans(text))
+
+    @classmethod
+    def _insert_model_blocks(cls, text: str, model_blocks: list[str]) -> str:
+        if not model_blocks:
+            return text
+        insert_at = text.rfind(")")
+        if insert_at == -1:
+            return text
+        indent = "\t"
+        for line in text.splitlines():
+            if line.lstrip().startswith("(property "):
+                indent = line[: len(line) - len(line.lstrip())]
+                break
+        block_text = "".join(
+            block if block.endswith("\n") else f"{block}\n"
+            for block in model_blocks
+        )
+        block_text = "".join(
+            f"{indent}{line.lstrip()}" if line.strip() else line
+            for line in block_text.splitlines(True)
+        )
+        prefix = "" if text[:insert_at].endswith("\n") else "\n"
+        return text[:insert_at] + prefix + block_text + text[insert_at:]
+
+    @classmethod
+    def copy_preserving_models_if_missing(cls, src: Path | str, dest: Path | str) -> bool:
+        """Copy footprint, restoring old model blocks only when the new footprint has none."""
+        src_path = Path(src)
+        dest_path = Path(dest)
+        old_models: list[str] = []
+        if dest_path.exists():
+            try:
+                old_models = cls._model_blocks(dest_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                old_models = []
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dest_path)
+
+        if not old_models:
+            return False
+        try:
+            new_text = dest_path.read_text(encoding="utf-8", errors="replace")
+            if cls._has_model_blocks(new_text):
+                return False
+            patched = cls._insert_model_blocks(new_text, old_models)
+            if patched != new_text:
+                dest_path.write_text(patched, encoding="utf-8")
+                return True
+        except Exception:
+            return False
+        return False
 
     @staticmethod
     def _is_abs(p: str) -> bool:

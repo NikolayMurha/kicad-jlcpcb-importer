@@ -41,8 +41,9 @@ from ...core.sym_lib_reader import (
     set_footprint_property,
 )
 from ...core.events import LogboxAppendEvent
-from ...core.helpers import PLUGIN_PATH, sanitize_lib_name, strip_lcsc_suffix
+from ...core.helpers import PLUGIN_PATH, sanitize_lib_name, strip_lcsc_suffix, as_bool
 from ...core.lib_paths import resolve_lib_root, resolve_library_base_name, resolve_target_library_name
+from ...core.platform_support import resolve_system_library_root
 from ...core.lib_tables import LibTablesManager
 from ...core.shared_lib import (
     ensure_project_legacy_models_link,
@@ -75,6 +76,7 @@ class KicadImporter:
         "symbol",
         "symbolid",
         "symboluuid",
+        "designator",
         "footprintid",
         "footprintuuid",
     }
@@ -86,6 +88,7 @@ class KicadImporter:
         "Symbol",
         "Symbol UUID",
         "Footprint UUID",
+        "Designator",
         "LCSC Description",
         "Part Description",
     )
@@ -255,12 +258,15 @@ class KicadImporter:
                     lib_root,
                     use_project_relative=False,
                     uri_prefix=shared_uri_prefix,
+                    lib_format="kicad",
                 )
                 ensure_project_table_links(self.project_path, lib_root, log=self.log)
             else:
                 _, uri_prefix = resolve_lib_root(general, self.project_path)
                 LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
-                    lib_root, uri_prefix=uri_prefix
+                    lib_root,
+                    uri_prefix=uri_prefix,
+                    lib_format="kicad",
                 )
             ensure_project_legacy_models_link(
                 self.project_path,
@@ -288,6 +294,83 @@ class KicadImporter:
         if not dest_step.exists():
             dest_step.write_bytes(src_step.read_bytes())
         return True
+
+    def _normalize_footprint_model_paths(self, footprint_dir: Path, models_dir: Path) -> int:
+        """Rewrite footprint model refs to the active models directory when possible."""
+        if not footprint_dir.exists() or not models_dir.exists():
+            return 0
+        model_base = self._model_3d_path(models_dir).rstrip("/")
+        changed = 0
+        for mod_path in sorted(footprint_dir.glob("*.kicad_mod")):
+            try:
+                content = mod_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            def _replace(match: re.Match) -> str:
+                original = match.group(1).strip()
+                if original.startswith("kicad-embed://"):
+                    return match.group(0)
+                name = Path(original.replace("\\", "/")).name
+                if not name:
+                    return match.group(0)
+                target = models_dir / name
+                if not target.exists():
+                    return match.group(0)
+                updated = f"{model_base}/{name}"
+                if updated == original:
+                    return match.group(0)
+                return f'(model "{updated}"'
+
+            patched = re.sub(r'\(model\s+"([^"]+)"', _replace, content)
+            if patched != content:
+                try:
+                    mod_path.write_text(patched, encoding="utf-8")
+                    changed += 1
+                except Exception:
+                    pass
+        if changed:
+            self.log(f"Normalized 3D model paths in {changed} footprint(s).\n")
+        return changed
+
+    def _normalize_board_model_paths(self, models_dir: Path) -> int:
+        """Rewrite placed-footprint model refs in project boards to the active models dir."""
+        if not models_dir.exists():
+            return 0
+        model_base = self._model_3d_path(models_dir).rstrip("/")
+        changed = 0
+        for board_path in sorted(self.project_path.glob("*.kicad_pcb")):
+            try:
+                content = board_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            def _replace(match: re.Match) -> str:
+                original = match.group(1).strip()
+                norm = original.replace("\\", "/")
+                if "EASYEDA_MODELS" not in norm and "/3dmodels/" not in norm:
+                    return match.group(0)
+                name = Path(norm).name
+                if not name:
+                    return match.group(0)
+                target = models_dir / name
+                if not target.exists():
+                    return match.group(0)
+                updated = f"{model_base}/{name}"
+                if updated == original:
+                    return match.group(0)
+                return f'(model "{updated}"'
+
+            patched = re.sub(r'\(model\s+"([^"]+)"', _replace, content)
+            if patched != content:
+                try:
+                    board_path.write_text(patched, encoding="utf-8")
+                    changed += 1
+                except Exception:
+                    pass
+        if changed:
+            self.log(f"Normalized 3D model paths in {changed} board file(s).\n")
+        return changed
 
     def warm_symbol_index_cache(
         self,
@@ -319,22 +402,6 @@ class KicadImporter:
         )
         self._get_symbol_index(sym_libs, general, max_libs=max_symbol_libs, progress_cb=progress_cb)
         return True
-
-    @staticmethod
-    def _as_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
 
     @staticmethod
     def _as_int(value, default: int) -> int:
@@ -498,10 +565,10 @@ class KicadImporter:
         return out
 
     def _kicad_builtin_first_enabled(self, general: Dict) -> bool:
-        return self._as_bool(general.get("kicad_builtin_first"), default=True)
+        return as_bool(general.get("kicad_builtin_first"), default=True)
 
     def _kicad_symbol_matching_enabled(self, general: Dict) -> bool:
-        return self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
+        return as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
 
     @staticmethod
     def _component_kind(
@@ -1183,7 +1250,7 @@ class KicadImporter:
                 "KiCad builtin: package size hints: "
                 f"{', '.join(sorted(package_dims))}.\n"
             )
-        require_keyword_overlap = self._as_bool(
+        require_keyword_overlap = as_bool(
             general.get("kicad_footprint_require_keyword_overlap"),
             default=True,
         )
@@ -1195,7 +1262,7 @@ class KicadImporter:
             0,
             self._as_int(general.get("kicad_footprint_fuzzy_min_gap_nonpassive"), 12),
         )
-        passive_size_strict_mode = self._as_bool(
+        passive_size_strict_mode = as_bool(
             general.get("kicad_footprint_passive_size_strict_mode"),
             default=True,
         )
@@ -1539,7 +1606,8 @@ class KicadImporter:
         except Exception:
             same = False
         if not same:
-            shutil.copy2(source_mod, dest_mod)
+            if FootprintEditor.copy_preserving_models_if_missing(source_mod, dest_mod):
+                self.log(f"KiCad builtin: preserved existing 3D model assignment for '{dest_mod.name}'.\n")
         if symbol_hit is None:
             self._apply_footprint_metadata(dest_mod, source_fp_ref)
             return None, dest_mod, None, source_fp_ref
@@ -1834,13 +1902,15 @@ class KicadImporter:
                             if src_mod is None:
                                 continue
                             footprint_path = footprint_dir / src_mod.name
-                            shutil.copy2(src_mod, footprint_path)
+                            if FootprintEditor.copy_preserving_models_if_missing(src_mod, footprint_path):
+                                self.log(f"KiCad fallback: preserved existing 3D model assignment for '{footprint_path.name}'.\n")
                             break
                         if footprint_path is None:
                             mods = list(converted_pretty.glob("*.kicad_mod"))
                             if mods:
                                 footprint_path = footprint_dir / mods[0].name
-                                shutil.copy2(mods[0], footprint_path)
+                                if FootprintEditor.copy_preserving_models_if_missing(mods[0], footprint_path):
+                                    self.log(f"KiCad fallback: preserved existing 3D model assignment for '{footprint_path.name}'.\n")
                             else:
                                 self.log("Warning: no footprint found in converted ELIBZ output.\n")
 
@@ -1878,6 +1948,8 @@ class KicadImporter:
                         # ComponentLoader sometimes skips a model download; fall back to a
                         # direct LCSC API download using the model UUID from device.json.
                         self._download_3d_model_fallback(attrs, model_title, models_dir)
+                    self._normalize_footprint_model_paths(footprint_dir, models_dir)
+                    self._normalize_board_model_paths(models_dir)
 
             self._apply_symbol_metadata(
                 symbol_lib_path=symbol_lib_path,
@@ -1945,14 +2017,7 @@ class KicadImporter:
         )
 
         if self.is_system_scope:
-            third_party = (
-                os.environ.get("KICAD10_3RD_PARTY")
-                or os.environ.get("KICAD9_3RD_PARTY")
-            )
-            if third_party and isinstance(third_party, str) and third_party.strip():
-                base_path = Path(third_party)
-            else:
-                base_path = Path(PLUGIN_PATH) / "libraries"
+            base_path = resolve_system_library_root(PLUGIN_PATH)
 
             plugin_folder = Path(PLUGIN_PATH).resolve().name
             symbols_root = base_path / "symbols" / plugin_folder
@@ -1964,7 +2029,9 @@ class KicadImporter:
         else:
             lib_root, _uri_prefix = resolve_lib_root(general, self.project_path)
             lib_root.mkdir(parents=True, exist_ok=True)
-            symbols_root = footprints_root = models_root = lib_root
+            lib_artifacts_root = lib_root / lib_name
+            lib_artifacts_root.mkdir(parents=True, exist_ok=True)
+            symbols_root = footprints_root = models_root = lib_artifacts_root
 
         return symbols_root, footprints_root, models_root, lib_name, lib_root
 

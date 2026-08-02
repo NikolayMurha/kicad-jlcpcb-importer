@@ -172,6 +172,86 @@ class LibTablesManager:
             self._write(table_path, "".join(kept_parts))
         return removed
 
+    def _uri_points_under(
+        self,
+        uri: str,
+        root: Path,
+        table_dir: Path,
+        project_path: Optional[Path],
+    ) -> bool:
+        try:
+            resolved = resolve_uri(uri, project_path=project_path, table_dir=table_dir)
+        except Exception:
+            resolved = uri
+        if self._has_uri_scheme(resolved) or self._contains_unresolved_var(resolved):
+            return False
+        try:
+            p = Path(resolved)
+            if not p.is_absolute():
+                p = (table_dir / p).resolve()
+            else:
+                p = p.resolve()
+            p.relative_to(root.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _resolved_uri_path(
+        self,
+        uri: str,
+        table_dir: Path,
+        project_path: Optional[Path],
+    ) -> Optional[Path]:
+        try:
+            resolved = resolve_uri(uri, project_path=project_path, table_dir=table_dir)
+        except Exception:
+            resolved = uri
+        if self._has_uri_scheme(resolved) or self._contains_unresolved_var(resolved):
+            return None
+        try:
+            p = Path(resolved)
+            if not p.is_absolute():
+                p = (table_dir / p).resolve()
+            else:
+                p = p.resolve()
+            return p
+        except Exception:
+            return None
+
+    def _remove_entries_from_table(
+        self,
+        table_path: Path,
+        table_kind: str,
+        predicate: Callable[[str, str, str], bool],
+    ) -> int:
+        content = self._read(table_path)
+        if not content:
+            return 0
+        blocks = self._iter_lib_blocks(content)
+        if not blocks:
+            return 0
+
+        kept_parts: List[str] = []
+        cursor = 0
+        removed = 0
+        for start, end, block in blocks:
+            remove = False
+            fields = self._parse_lib_fields(block)
+            if fields is not None:
+                name, lib_type, uri = fields
+                remove = predicate(name, lib_type, uri)
+                if remove:
+                    removed += 1
+                    self._log(f"Removed stale {table_kind} entry: {name} -> {uri}\n")
+
+            kept_parts.append(content[cursor:start if remove else end])
+            cursor = end
+
+        kept_parts.append(content[cursor:])
+        if removed > 0:
+            self._write(table_path, "".join(kept_parts))
+        return removed
+
     # --------------- public API ---------------
     def ensure_project_lib_tables(
         self,
@@ -179,6 +259,7 @@ class LibTablesManager:
         use_project_relative: bool = True,
         uri_prefix: str | None = None,
         use_lib_relative_uri: bool = False,
+        lib_format: str | None = None,
     ) -> Tuple[List[Path], List[Path], Path]:
         """Discover generated libraries under out_dir and ensure project lib tables reference them.
 
@@ -194,15 +275,83 @@ class LibTablesManager:
         fp_tbl = project_dir / "fp-lib-table"
 
         lib_dir = Path(out_dir)
-        sym_files = sorted(lib_dir.rglob("*.kicad_sym"))
-        pretty_dirs = sorted(p for p in lib_dir.rglob("*.pretty") if p.is_dir())
-        elibz_files = sorted(lib_dir.rglob("*.elibz"))
+        fmt = str(lib_format or "all").strip().lower()
+        include_kicad = fmt not in ("easyeda_pro", "easyeda", "elibz")
+        include_elibz = fmt not in ("kicad", "kicad_native")
+
+        sym_files = sorted(lib_dir.rglob("*.kicad_sym")) if include_kicad else []
+        pretty_dirs = sorted(p for p in lib_dir.rglob("*.pretty") if p.is_dir()) if include_kicad else []
+        elibz_files = sorted(lib_dir.rglob("*.elibz")) if include_elibz else []
         lib_base = lib_dir
+
+        nested_sym_names = {p.stem for p in sym_files if p.parent.parent == lib_dir and p.parent.name == p.stem}
+        nested_pretty_names = {p.stem for p in pretty_dirs if p.parent == lib_dir / p.stem}
+        nested_elibz_names = {p.stem for p in elibz_files if p.parent.parent == lib_dir and p.parent.name == p.stem}
+        superseded_direct_paths = {
+            *(p.resolve() for p in sym_files if p.parent == lib_dir and p.stem in nested_sym_names),
+            *(p.resolve() for p in pretty_dirs if p.parent == lib_dir and p.stem in nested_pretty_names),
+            *(p.resolve() for p in elibz_files if p.parent == lib_dir and p.stem in nested_elibz_names),
+        }
+        if superseded_direct_paths:
+            sym_files = [p for p in sym_files if p.resolve() not in superseded_direct_paths]
+            pretty_dirs = [p for p in pretty_dirs if p.resolve() not in superseded_direct_paths]
+            elibz_files = [p for p in elibz_files if p.resolve() not in superseded_direct_paths]
 
         self._log(
             f"Updating library tables in: {project_dir}\n"
             f"Found symbols: {len(sym_files)}; footprint libs: {len(pretty_dirs)}; elibz: {len(elibz_files)}\n"
         )
+
+        def _is_managed_uri(uri: str) -> bool:
+            return self._uri_points_under(
+                uri,
+                root=lib_dir,
+                table_dir=project_dir,
+                project_path=project_dir,
+            )
+
+        def _is_superseded_direct_uri(uri: str) -> bool:
+            resolved = self._resolved_uri_path(uri, table_dir=project_dir, project_path=project_dir)
+            return resolved in superseded_direct_paths if resolved is not None else False
+
+        if superseded_direct_paths:
+            self._remove_entries_from_table(
+                sym_tbl,
+                "sym-lib-table",
+                lambda _name, _lib_type, uri: _is_superseded_direct_uri(uri),
+            )
+            self._remove_entries_from_table(
+                fp_tbl,
+                "fp-lib-table",
+                lambda _name, _lib_type, uri: _is_superseded_direct_uri(uri),
+            )
+
+        if not include_elibz:
+            self._remove_entries_from_table(
+                sym_tbl,
+                "sym-lib-table",
+                lambda _name, lib_type, uri: _is_managed_uri(uri)
+                and (uri.lower().endswith(".elibz") or lib_type in ("EasyEDA (JLCEDA) Pro", "EasyEDA_Pro", "EasyEDA / JLCEDA Pro")),
+            )
+            self._remove_entries_from_table(
+                fp_tbl,
+                "fp-lib-table",
+                lambda _name, lib_type, uri: _is_managed_uri(uri)
+                and (uri.lower().endswith(".elibz") or lib_type in ("EasyEDA (JLCEDA) Pro", "EasyEDA_Pro", "EasyEDA / JLCEDA Pro")),
+            )
+        if not include_kicad:
+            self._remove_entries_from_table(
+                sym_tbl,
+                "sym-lib-table",
+                lambda _name, lib_type, uri: _is_managed_uri(uri)
+                and (uri.lower().endswith(".kicad_sym") or lib_type in ("KiCad", "KiCad_Sym")),
+            )
+            self._remove_entries_from_table(
+                fp_tbl,
+                "fp-lib-table",
+                lambda _name, lib_type, uri: _is_managed_uri(uri)
+                and (uri.lower().endswith(".pretty") or lib_type in ("KiCad", "KiCad_Fp")),
+            )
 
         sym_content = self._read(sym_tbl)
         fp_content = self._read(fp_tbl)

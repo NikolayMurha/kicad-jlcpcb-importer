@@ -37,6 +37,7 @@ from .sym_lib_reader import (
     get_footprint_property,
     patch_footprint_property,
 )
+from ..ui.footprint_editor import FootprintEditor
 
 _BUILTIN_3D_PREFIXES = ("${KICAD", "$ENV{KICAD", "$(KICAD")
 
@@ -78,7 +79,7 @@ class LibraryVendorService:
 
         try:
             dest_pretty.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_mod, dest_pretty / src_mod.name)
+            FootprintEditor.copy_preserving_models_if_missing(src_mod, dest_pretty / src_mod.name)
             model_copied = self._copy_kicad_3d_model(
                 f"{src_alias}:{fp_name}",
                 dest_pretty,
@@ -104,15 +105,15 @@ class LibraryVendorService:
     def _get_dest_lib_path(self, category_hint: str) -> Path:
         lib_dir, _uri_prefix = resolve_lib_root(self.general, self.project_path)
         lib_name = self._dest_lib_name(category_hint)
-        return lib_dir / f"{lib_name}.kicad_sym"
+        return lib_dir / lib_name / f"{lib_name}.kicad_sym"
 
     def _get_dest_pretty_path(self, category_hint: str) -> Path:
         dest = self._get_dest_lib_path(category_hint)
         return dest.parent / f"{dest.stem}.pretty"
 
-    def _get_models_dir(self) -> Path:
-        lib_dir, _uri_prefix = resolve_lib_root(self.general, self.project_path)
-        return lib_dir / "3dmodels"
+    @staticmethod
+    def _get_models_dir_for(dest: Path) -> Path:
+        return Path(dest).parent / "3dmodels"
 
     def _uri_prefix(self) -> str:
         _lib_dir, uri_prefix = resolve_lib_root(self.general, self.project_path)
@@ -185,10 +186,10 @@ class LibraryVendorService:
                     if src_mod is None:
                         continue
                     footprint_path = dest_pretty / src_mod.name
-                    shutil.copy2(src_mod, footprint_path)
+                    FootprintEditor.copy_preserving_models_if_missing(src_mod, footprint_path)
                     break
 
-            model_copied = self._copy_elibz_step_model(symbol_name, src_path)
+            model_copied = self._copy_elibz_step_model(symbol_name, src_path, dest)
             if model_copied:
                 try:
                     if footprint_path is not None:
@@ -206,7 +207,7 @@ class LibraryVendorService:
         except Exception as exc:
             return False, f"ELIBZ → KiCad conversion failed: {exc}"
 
-    def _copy_elibz_step_model(self, symbol_name: str, src_path: Path) -> bool:
+    def _copy_elibz_step_model(self, symbol_name: str, src_path: Path, dest: Path) -> bool:
         try:
             payload = load_elibz_payload(src_path)
             dev = find_device_by_name(payload, symbol_name)
@@ -227,7 +228,7 @@ class LibraryVendorService:
         if src_step is None:
             return False
 
-        dest_models = self._get_models_dir()
+        dest_models = self._get_models_dir_for(dest)
         dest_models.mkdir(parents=True, exist_ok=True)
         dest_step = dest_models / src_step.name
         if not dest_step.exists():
@@ -302,8 +303,8 @@ class LibraryVendorService:
 
         copied = False
         new_content = content
-        dest_models_dir = self._get_models_dir()
-        models_base = self._model_uri_base().rstrip("/")
+        dest_models_dir = dest_pretty.parent / "3dmodels"
+        models_base = self._model_uri_base(dest_models_dir).rstrip("/")
 
         for model_path in model_paths:
             if any(model_path.startswith(p) for p in _BUILTIN_3D_PREFIXES):
@@ -419,13 +420,13 @@ class LibraryVendorService:
             if not src.exists():
                 return False
             dest_pretty.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest_pretty / f"{fp_name}.kicad_mod")
+            FootprintEditor.copy_preserving_models_if_missing(src, dest_pretty / f"{fp_name}.kicad_mod")
             return True
         except Exception:
             return False
 
-    def _model_uri_base(self) -> str:
-        models_dir = self._get_models_dir().resolve()
+    def _model_uri_base(self, models_dir: Path) -> str:
+        models_dir = Path(models_dir).resolve()
         try:
             rel = os.path.relpath(models_dir, self.project_path.resolve())
             return "${KIPRJMOD}/" + Path(rel).as_posix()
@@ -436,20 +437,20 @@ class LibraryVendorService:
         try:
             scope = str(self.general.get("library_scope", "project")).strip().lower()
             if scope == "shared":
-                shared_root = dest.parent
+                shared_root, shared_uri_prefix = resolve_lib_root(
+                    self.general,
+                    self.project_path,
+                )
                 default_name = resolve_library_base_name(
                     self.general,
                     project_path=self.project_path,
                 )
                 ensure_shared_meta(shared_root, default_name, log=lambda _: None)
-                _shared_root, shared_uri_prefix = resolve_lib_root(
-                    self.general,
-                    self.project_path,
-                )
                 LibTablesManager(shared_root, log=lambda _: None).ensure_project_lib_tables(
                     shared_root,
                     use_project_relative=False,
                     uri_prefix=shared_uri_prefix,
+                    lib_format="kicad",
                 )
                 ensure_project_table_links(
                     self.project_path,
@@ -457,13 +458,15 @@ class LibraryVendorService:
                     log=lambda _: None,
                 )
             else:
+                lib_root, uri_prefix = resolve_lib_root(self.general, self.project_path)
                 LibTablesManager(self.project_path, log=lambda _: None).ensure_project_lib_tables(
-                    dest.parent,
-                    uri_prefix=self._uri_prefix(),
+                    lib_root,
+                    uri_prefix=uri_prefix,
+                    lib_format="kicad",
                 )
             ensure_project_legacy_models_link(
                 self.project_path,
-                self._get_models_dir(),
+                self._get_models_dir_for(dest),
                 log=lambda _: None,
             )
         except Exception:

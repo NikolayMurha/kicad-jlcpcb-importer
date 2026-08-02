@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional, Tuple
 import wx  # type: ignore
 from ...core.events import LogboxAppendEvent
 
-from ...core.helpers import PLUGIN_PATH, sanitize_lib_name
+from ...core.helpers import PLUGIN_PATH, sanitize_lib_name, as_bool
 from ...core.lib_paths import resolve_lib_root, resolve_library_base_name, resolve_target_library_name
+from ...core.platform_support import resolve_system_library_root
 from ...core.lib_tables import LibTablesManager
 from ...core.shared_lib import (
     ensure_project_legacy_models_link,
@@ -53,14 +53,7 @@ class EasyedaProImporter:
         )
 
         if self.is_system_scope:
-            third_party = (
-                os.environ.get("KICAD10_3RD_PARTY")
-                or os.environ.get("KICAD9_3RD_PARTY")
-            )
-            if third_party and isinstance(third_party, str) and third_party.strip():
-                base_path = Path(third_party)
-            else:
-                base_path = Path(PLUGIN_PATH) / "libraries"
+            base_path = resolve_system_library_root(PLUGIN_PATH)
 
             plugin_folder = Path(PLUGIN_PATH).resolve().name
             symbols_path = base_path / "symbols" / plugin_folder
@@ -74,10 +67,10 @@ class EasyedaProImporter:
         else:
             lib_root, _ = resolve_lib_root(general, self.project_path)
             lib_root.mkdir(parents=True, exist_ok=True)
-            symbols_path = footprints_path = lib_root
-            # KiCad's built-in EasyEDA Pro library reader generates model paths as
-            # ${KIPRJMOD}/EASYEDA_MODELS/<name>.step, so we store models there.
-            models_3d_path = self.project_path / "EASYEDA_MODELS"
+            lib_artifacts_root = lib_root / target_output_name
+            lib_artifacts_root.mkdir(parents=True, exist_ok=True)
+            symbols_path = footprints_path = lib_artifacts_root
+            models_3d_path = lib_artifacts_root / "3dmodels"
 
         return symbols_path, footprints_path, models_3d_path, target_output_name, lib_root
 
@@ -96,22 +89,6 @@ class EasyedaProImporter:
         except Exception:
             # Keep progress best-effort; ignore UI errors
             pass
-
-    @staticmethod
-    def _as_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
 
     def import_part(
         self,
@@ -137,7 +114,7 @@ class EasyedaProImporter:
                 general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
             except Exception:
                 general = {}
-            debug_log = self._as_bool(general.get("debug_log"), False)
+            debug_log = as_bool(general.get("debug_log"), False)
             loader = ComponentLoader(
                 kiprjmod=str(self.project_path),
                 target_path=str(target_path),
@@ -161,12 +138,15 @@ class EasyedaProImporter:
                             lib_root,
                             use_project_relative=False,
                             uri_prefix=shared_uri_prefix,
+                            lib_format="easyeda_pro",
                         )
                         ensure_project_table_links(self.project_path, lib_root, log=self.log)
                     else:
                         _, uri_prefix = resolve_lib_root(general, self.project_path)
                         LibTablesManager(self.project_path, log=self.log).ensure_project_lib_tables(
-                            lib_root, uri_prefix=uri_prefix
+                            lib_root,
+                            uri_prefix=uri_prefix,
+                            lib_format="easyeda_pro",
                         )
                     ensure_project_legacy_models_link(
                         self.project_path,

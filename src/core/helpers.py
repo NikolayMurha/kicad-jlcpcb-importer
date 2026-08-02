@@ -20,6 +20,24 @@ EXCLUDE_FROM_POS = 2
 EXCLUDE_FROM_BOM = 3
 
 
+def as_bool(value, default: bool = False) -> bool:
+    """Normalize JSON/UI boolean values consistently across the plugin."""
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
 def getWxWidgetsVersion():
     """Get wx widgets version."""
     v = re.search(r"wxWidgets\s([\d\.]+)", wx.version())

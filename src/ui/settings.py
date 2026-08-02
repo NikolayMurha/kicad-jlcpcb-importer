@@ -7,7 +7,7 @@ from pathlib import Path
 import wx  # pylint: disable=import-error
 
 from ..core.events import UpdateSetting
-from ..core.helpers import HighResWxSize, loadBitmapScaled, apply_button_label_tooltips
+from ..core.helpers import HighResWxSize, loadBitmapScaled, apply_button_label_tooltips, as_bool
 from ..core.lib_paths import (
     DEFAULT_LIB_PATH,
     DEFAULT_LIB_DIR_NAME,
@@ -58,7 +58,7 @@ class MappingIndexSettingsDialog(wx.Dialog):
             wx.ID_ANY,
             "Prefer KiCad built-in symbol/footprint mapping before EasyEDA import",
         )
-        self.kicad_builtin_first_ctrl.SetValue(self._as_bool(general.get("kicad_builtin_first"), True))
+        self.kicad_builtin_first_ctrl.SetValue(as_bool(general.get("kicad_builtin_first"), True))
         root.Add(self.kicad_builtin_first_ctrl, 0, wx.ALL | wx.EXPAND, 8)
 
         grid = wx.FlexGridSizer(11, 2, 8, 12)
@@ -262,7 +262,7 @@ class MappingIndexSettingsDialog(wx.Dialog):
         grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
         self.fp_require_keyword_overlap_ctrl = wx.CheckBox(self, wx.ID_ANY, "")
         self.fp_require_keyword_overlap_ctrl.SetValue(
-            self._as_bool(general.get("kicad_footprint_require_keyword_overlap"), True)
+            as_bool(general.get("kicad_footprint_require_keyword_overlap"), True)
         )
         self.fp_require_keyword_overlap_ctrl.SetToolTip(
             "Require overlap between extracted package tokens and footprint name tokens in fuzzy/strict passes. "
@@ -278,7 +278,7 @@ class MappingIndexSettingsDialog(wx.Dialog):
         grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
         self.fp_passive_size_strict_mode_ctrl = wx.CheckBox(self, wx.ID_ANY, "")
         self.fp_passive_size_strict_mode_ctrl.SetValue(
-            self._as_bool(general.get("kicad_footprint_passive_size_strict_mode"), True)
+            as_bool(general.get("kicad_footprint_passive_size_strict_mode"), True)
         )
         self.fp_passive_size_strict_mode_ctrl.SetToolTip(
             "When passive package size hint exists (example 0402/1005), require strict chip-size match. "
@@ -322,22 +322,6 @@ class MappingIndexSettingsDialog(wx.Dialog):
         self.CentreOnParent()
         apply_button_label_tooltips(self, overwrite=False)
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
-
-    @staticmethod
-    def _as_bool(value, default: bool) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
 
     @staticmethod
     def _as_int(value, default: int, min_v: int, max_v: int) -> int:
@@ -658,12 +642,14 @@ class SettingsDialog(wx.Dialog):
             id=wx.ID_ANY,
             title="JLCPCB importer plugin settings",
             pos=wx.DefaultPosition,
-            size=HighResWxSize(parent.window, wx.Size(560, 380)),
+            size=HighResWxSize(parent.window, wx.Size(620, 520)),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX,
         )
 
         self.logger = logging.getLogger(__name__)
         self.parent = parent
+        self._initial_values: dict = {}
+        self._initial_library_name = ""
 
         # Hotkeys
         quitid = wx.NewId()
@@ -825,7 +811,20 @@ class SettingsDialog(wx.Dialog):
         gen_box.Add(maintenance_row, 0, wx.ALL | wx.EXPAND, 5)
 
         layout.Add(gen_box, 0, wx.ALL | wx.EXPAND, 5)
+
+        button_row = wx.StdDialogButtonSizer()
+        self._save_btn = wx.Button(self, wx.ID_OK, "Save")
+        self._cancel_btn = wx.Button(self, wx.ID_CANCEL, "Cancel")
+        self._save_btn.Bind(wx.EVT_BUTTON, self._on_save)
+        self._cancel_btn.Bind(wx.EVT_BUTTON, self.quit_dialog)
+        button_row.AddButton(self._save_btn)
+        button_row.AddButton(self._cancel_btn)
+        button_row.Realize()
+        layout.Add(button_row, 0, wx.ALL | wx.EXPAND, 10)
+
         self.SetSizer(layout)
+        self.SetMinSize(HighResWxSize(parent.window, wx.Size(620, 520)))
+        layout.Fit(self)
         self.Layout()
         self.Centre(wx.BOTH)
         apply_button_label_tooltips(self, overwrite=True)
@@ -834,18 +833,29 @@ class SettingsDialog(wx.Dialog):
 
     def load_settings(self):
         general = self.parent.settings.get("general", {})
+        self._initial_library_name = resolve_library_base_name(
+            general,
+            project_path=Path(self.parent.project_path),
+        )
         self.update_library_scope(general.get("library_scope", "project"))
         self.update_group_by_category(resolve_group_by_category(general, default=False))
-        self.update_hide_button_labels(self._as_bool(general.get("hide_button_labels"), default=False))
-        self.update_debug_log(self._as_bool(general.get("debug_log"), default=False))
-        self.update_lib_prefix(
-            resolve_library_base_name(general, project_path=Path(self.parent.project_path))
-        )
+        self.update_hide_button_labels(as_bool(general.get("hide_button_labels"), default=False))
+        self.update_debug_log(as_bool(general.get("debug_log"), default=False))
+        self.update_lib_prefix(self._initial_library_name)
         self.update_lib_format(general.get("lib_format", "easyeda_pro"))
         self.update_kicad_symbol_matching_enabled(
-            self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
+            as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
         )
         self.update_lib_path(self._resolve_lib_path_setting(general))
+        self._initial_values = self._current_values()
+        try:
+            self.parent.log(
+                "SettingsDialog: loaded "
+                f"initial_library_name={self._initial_library_name!r} "
+                f"initial_values={self._initial_values!r}\n"
+            )
+        except Exception:
+            pass
 
     def _resolve_lib_path_setting(self, general: dict) -> str:
         scope = str(general.get("library_scope", "project")).strip().lower()
@@ -870,7 +880,7 @@ class SettingsDialog(wx.Dialog):
         return raw or DEFAULT_LIB_PATH
 
     def update_settings(self, event):
-        """Update and persist a setting that was changed."""
+        """Update dependent controls without saving settings."""
         obj = event.GetEventObject()
         raw_name = obj.GetName()
         if "_" not in raw_name:
@@ -888,6 +898,18 @@ class SettingsDialog(wx.Dialog):
                 value = sel
         else:
             value = None
+        try:
+            if section == "general" and name in ("lib_prefix", "lib_path", "lib_format", "library_scope"):
+                current = ""
+                try:
+                    current = str(obj.GetValue())
+                except Exception:
+                    current = str(value)
+                self.parent.log(
+                    f"SettingsDialog: change {section}.{name} value={value!r} control={current!r}\n"
+                )
+        except Exception:
+            pass
         getattr(self, f"update_{name}")(value)
         if name == "library_scope":
             scope_key = str(value or "project").strip().lower()
@@ -897,20 +919,63 @@ class SettingsDialog(wx.Dialog):
             )
             if self.lib_path_ctrl.GetValue() != normalized_lib_path:
                 self.lib_path_ctrl.ChangeValue(normalized_lib_path)
-            wx.PostEvent(
-                self.parent,
-                UpdateSetting(section="general", setting="lib_path", value=normalized_lib_path),
-            )
         if name == "library_scope" and str(value).lower() == "shared":
             self._show_shared_scope_notice()
-        wx.PostEvent(
-            self.parent,
-            UpdateSetting(section=section, setting=name, value=value),
-        )
+
+    def _current_values(self) -> dict:
+        try:
+            scope_sel = self.library_scope_box.GetSelection()
+        except Exception:
+            scope_sel = 0
+        scope = "project" if scope_sel == 0 else ("system" if scope_sel == 1 else "shared")
+
+        try:
+            fmt_sel = self.lib_format_ctrl.GetSelection()
+        except Exception:
+            fmt_sel = 0
+        lib_format = "kicad" if fmt_sel == 1 else "easyeda_pro"
+
+        lib_path = self._normalize_lib_path_for_scope(scope, self.lib_path_ctrl.GetValue())
+        return {
+            "library_scope": scope,
+            "lib_format": lib_format,
+            "group_by_category": bool(self.group_by_category_ctrl.GetValue()),
+            "hide_button_labels": bool(self.hide_button_labels_ctrl.GetValue()),
+            "debug_log": bool(self.debug_log_ctrl.GetValue()),
+            "lib_prefix": str(self.lib_prefix_ctrl.GetValue() or "").strip(),
+            "lib_path": lib_path,
+            "kicad_symbol_matching_enabled": bool(self.kicad_symbol_matching_enabled_ctrl.GetValue()),
+        }
+
+    def _on_save(self, _evt=None):
+        values = self._current_values()
+        try:
+            self.parent.log(f"SettingsDialog: save clicked values={values!r}\n")
+        except Exception:
+            pass
+        current = (self.parent.settings.get("general", {}) or {})
+        baseline = self._initial_values or current
+        for setting, value in values.items():
+            if baseline.get(setting) == value:
+                continue
+            event = UpdateSetting(section="general", setting=setting, value=value)
+            if setting == "lib_prefix":
+                try:
+                    event.previous_value = self._initial_library_name
+                except Exception:
+                    pass
+            try:
+                self.parent._on_update_setting(event)
+            except Exception as exc:
+                try:
+                    self.parent.log(f"SettingsDialog: direct save handler failed for {setting}: {exc}\n")
+                except Exception:
+                    pass
+                wx.PostEvent(self.parent, event)
+        self.EndModal(wx.ID_OK)
 
     def quit_dialog(self, *_):
-        self.Destroy()
-        self.EndModal(0)
+        self.EndModal(wx.ID_CANCEL)
 
     def update_library_scope(self, scope):
         if isinstance(scope, str):
@@ -989,25 +1054,9 @@ class SettingsDialog(wx.Dialog):
         except Exception:
             pass
 
-    @staticmethod
-    def _as_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            v = value.strip().lower()
-            if v in ("1", "true", "yes", "on"):
-                return True
-            if v in ("0", "false", "no", "off"):
-                return False
-        return default
-
     def update_group_by_category(self, value):
         try:
-            enabled = self._as_bool(value, default=True)
+            enabled = as_bool(value, default=True)
             self.group_by_category_ctrl.SetValue(enabled)
             self._lib_name_label.SetLabel(
                 "Library name prefix:" if enabled else "Library name:"
@@ -1024,13 +1073,13 @@ class SettingsDialog(wx.Dialog):
 
     def update_hide_button_labels(self, value):
         try:
-            self.hide_button_labels_ctrl.SetValue(self._as_bool(value, default=False))
+            self.hide_button_labels_ctrl.SetValue(as_bool(value, default=False))
         except Exception:
             pass
 
     def update_debug_log(self, value):
         try:
-            self.debug_log_ctrl.SetValue(self._as_bool(value, default=False))
+            self.debug_log_ctrl.SetValue(as_bool(value, default=False))
         except Exception:
             pass
 
@@ -1046,7 +1095,7 @@ class SettingsDialog(wx.Dialog):
             pass
 
     def update_kicad_symbol_matching_enabled(self, value):
-        enabled = self._as_bool(value, default=False)
+        enabled = as_bool(value, default=False)
         try:
             self.kicad_symbol_matching_enabled_ctrl.SetValue(enabled)
         except Exception:
@@ -1093,7 +1142,6 @@ class SettingsDialog(wx.Dialog):
                 # Express as ${KIPRJMOD}/... using os.path.relpath (handles ..)
                 rel = os.path.relpath(chosen, project_path)
                 result = "${KIPRJMOD}/" + Path(rel).as_posix()
-                # SetValue fires EVT_TEXT → update_settings → saves automatically
                 self.lib_path_ctrl.SetValue(result)
         finally:
             dlg.Destroy()
@@ -1110,9 +1158,9 @@ class SettingsDialog(wx.Dialog):
             "- sym-lib-table / fp-lib-table are stored inside the shared library directory.\n"
             "- Each project receives links to these tables.\n"
             "- Shared metadata (including library name) is stored in jlcpcb_shared.json.\n\n"
-            "Windows warning:\n"
-            "Creating symlinks may require Developer Mode or Administrator privileges.\n"
-            "If symlink creation fails, plugin will copy table files instead.",
+            "Symlink note:\n"
+            "Some filesystems and sandboxes restrict symlink creation.\n"
+            "If linking fails, the plugin will copy table files instead.",
             "Shared Library Mode",
             wx.OK | wx.ICON_INFORMATION,
         )
@@ -1121,7 +1169,7 @@ class SettingsDialog(wx.Dialog):
         dlg = None
         try:
             general = (self.parent.settings.get("general", {}) or {})
-            if not self._as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
+            if not as_bool(general.get("kicad_symbol_matching_enabled"), default=False):
                 return
             dlg = MappingIndexSettingsDialog(self.parent, general)
             if dlg.ShowModal() != wx.ID_OK:
