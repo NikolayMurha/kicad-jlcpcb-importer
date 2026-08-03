@@ -28,14 +28,12 @@ class EasyedaProImporter:
         python_exe: str,
         parent_window: Optional[wx.Window] = None,
         scope: str = "project",
-        lib_dir: Optional[Path | str] = None,
     ) -> None:
         self.project_path = Path(project_path)
         self.python_exe = python_exe
         # support both names for clarity
         self.parent_window = parent_window
         self.scope = str(scope).lower()
-        self.lib_dir = Path(lib_dir) if lib_dir is not None else (Path(PLUGIN_PATH) / "lib")
 
     def _compute_outputs(self) -> Tuple[Path, Path, Path, str, Path]:
 

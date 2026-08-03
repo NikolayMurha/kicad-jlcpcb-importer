@@ -1,16 +1,13 @@
 import gzip
 import io
-import platform
 
 _AES_IMPORT_ERROR = None
 
 def _build_aes_error_message():
-    if platform.system() == "Windows":
-        return (
-            "Please install PyCryptodome in KiCad Command Prompt using: "
-            "pip install pycryptodome --target ./lib"
-        )
-    return "Please install PyCryptodome using: pip install pycryptodome --target ./lib"
+    return (
+        "PyCryptodome is missing; reinstall the plugin from KiCad's "
+        "Plugin and Content Manager"
+    )
 
 def _load_aes():
     global _AES_IMPORT_ERROR

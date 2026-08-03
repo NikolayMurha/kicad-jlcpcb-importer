@@ -1,0 +1,30 @@
+{
+    "$schema": "https://go.kicad.org/api/schemas/v1",
+    "identifier": "com.github.nikolaymurha.kicad-jlcpcb-importer",
+    "name": "JLCPCB Importer",
+    "description": "Search LCSC/JLCPCB parts and import symbols, footprints, and 3D models",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.9"
+    },
+    "actions": [
+        {
+            "identifier": "open-importer",
+            "name": "JLCPCB Importer",
+            "description": "Search LCSC parts and manage project libraries",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "ipc_main.py",
+            "icons-light": [
+                "images/jlcpcb_24x24.png",
+                "images/jlcpcb_48x48.png"
+            ],
+            "icons-dark": [
+                "images/jlcpcb_24x24.png",
+                "images/jlcpcb_48x48.png"
+            ]
+        }
+    ]
+}

@@ -25,7 +25,7 @@ BROWSER_HEADERS = {
 
 
 def _require_requests():
-    """Load requests after the runtime dependency installer has run."""
+    """Load requests from the KiCad-managed IPC environment."""
 
     global requests
     if requests is None:

@@ -35,7 +35,7 @@ class PlatformSupportTests(unittest.TestCase):
             system_name="Linux",
             environ={},
             home="/home/test",
-            version_text="9.0.6",
+            version_text="10.0.6",
         )
         mac = resolve_system_library_root(
             "/plugin",
@@ -44,19 +44,19 @@ class PlatformSupportTests(unittest.TestCase):
             home="/Users/test",
             version_text="10.0.5",
         )
-        self.assertEqual(linux, Path("/home/test/.local/share/kicad/9.0/3rdparty"))
+        self.assertEqual(linux, Path("/home/test/.local/share/kicad/10.0/3rdparty"))
         self.assertEqual(mac, Path("/Users/test/Documents/KiCad/10.0/3rdparty"))
 
         windows = resolve_system_library_root(
             "/plugin",
             system_name="Windows",
-            environ={"USERPROFILE": "C:/Users/test"},
+            environ={"APPDATA": "C:/Users/test/AppData/Roaming"},
             home="C:/fallback",
             version_text="10.0.1",
         )
         self.assertEqual(
             windows,
-            Path("C:/Users/test/Documents/KiCad/10.0/3rdparty"),
+            Path("C:/Users/test/AppData/Roaming/kicad/10.0/3rdparty"),
         )
 
     def test_cli_environment_override(self) -> None:

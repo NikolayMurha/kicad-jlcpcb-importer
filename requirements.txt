@@ -1,4 +1,7 @@
-# Third-party runtime dependencies installed into the plugin's lib/ folder
+# KiCad 10 installs these into the IPC plugin's managed Python environment.
+kicad-python>=0.6,<1
+wxPython~=4.2
+cadquery-ocp>=7.7,<8
 pillow
 requests
 pycryptodome

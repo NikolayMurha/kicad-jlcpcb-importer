@@ -2,7 +2,7 @@
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "KiCad JLCPCB Importer",
     "description": "Search LCSC/JLCPCB parts and import via the built-in EasyEDA Pro backend",
-    "description_full": "Linux, macOS, and Windows plugin for searching the LCSC/JLCPCB catalog, assigning LCSC numbers, and importing symbols, footprints, and 3D models. Requires KiCad 9 or newer.",
+    "description_full": "Linux, macOS, and Windows IPC API plugin for searching the LCSC/JLCPCB catalog and importing symbols, footprints, and 3D models. Requires KiCad 10 or newer.",
     "identifier": "com.github.nikolaymurha.kicad-jlcpcb-importer",
     "type": "plugin",
     "author": {
@@ -24,10 +24,13 @@
     "versions": [{
         "version": "VERSION_HERE",
         "status": "testing",
-        "kicad_version": "9.0",
+        "runtime": "ipc",
+        "platforms": ["linux", "macos", "windows"],
+        "kicad_version": "10.0",
         "download_sha256": "SHA256_HERE",
         "download_size": DOWNLOAD_SIZE_HERE,
         "download_url": "DOWNLOAD_URL_HERE",
-        "install_size": INSTALL_SIZE_HERE
+        "install_size": INSTALL_SIZE_HERE,
+        "keep_on_update": ["^jlcpcb/.*", "^cache/.*"]
     }]
 }

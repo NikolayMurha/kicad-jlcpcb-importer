@@ -19,13 +19,11 @@ class EasyedaImporter:
         python_exe: str,
         parent_window: Optional[wx.Window] = None,
         scope: str = "project",
-        lib_dir: Optional[Path | str] = None,
     ) -> None:
         self.project_path = Path(project_path)
         self.python_exe = python_exe
         self.parent_window = parent_window
         self.scope = str(scope).lower()
-        self.lib_dir = Path(lib_dir) if lib_dir is not None else None
         self._impl = self._select_impl()
 
     def _select_impl(self):
@@ -43,14 +41,12 @@ class EasyedaImporter:
                 python_exe=self.python_exe,
                 parent_window=self.parent_window,
                 scope=self.scope,
-                lib_dir=self.lib_dir,
             )
         return EasyedaProImporter(
             project_path=self.project_path,
             python_exe=self.python_exe,
             parent_window=self.parent_window,
             scope=self.scope,
-            lib_dir=self.lib_dir,
         )
 
     def import_part(self, lcsc_id: str) -> Tuple[bool, Path]:

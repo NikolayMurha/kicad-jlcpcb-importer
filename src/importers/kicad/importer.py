@@ -41,7 +41,13 @@ from ...core.sym_lib_reader import (
     set_footprint_property,
 )
 from ...core.events import LogboxAppendEvent
-from ...core.helpers import PLUGIN_PATH, sanitize_lib_name, strip_lcsc_suffix, as_bool
+from ...core.helpers import (
+    PLUGIN_PATH,
+    as_bool,
+    sanitize_lib_name,
+    strip_lcsc_suffix,
+)
+from ...core.plugin_paths import get_plugin_cache_path
 from ...core.lib_paths import resolve_lib_root, resolve_library_base_name, resolve_target_library_name
 from ...core.platform_support import resolve_system_library_root
 from ...core.lib_tables import LibTablesManager
@@ -174,13 +180,11 @@ class KicadImporter:
         python_exe: str,
         parent_window: Optional[wx.Window] = None,
         scope: str = "project",
-        lib_dir: Optional[Path | str] = None,
     ) -> None:
         self.project_path = Path(project_path)
         self.python_exe = python_exe
         self.parent_window = parent_window
         self.scope = str(scope).lower()
-        self.lib_dir = Path(lib_dir) if lib_dir is not None else None
         self._symbol_index_cache_key: str = ""
         self._symbol_index_cache: Dict[str, Tuple[str, Path]] = {}
         self._lcsc_symbol_index_cache: Dict[str, Tuple[str, Path]] = {}
@@ -331,45 +335,6 @@ class KicadImporter:
                     pass
         if changed:
             self.log(f"Normalized 3D model paths in {changed} footprint(s).\n")
-        return changed
-
-    def _normalize_board_model_paths(self, models_dir: Path) -> int:
-        """Rewrite placed-footprint model refs in project boards to the active models dir."""
-        if not models_dir.exists():
-            return 0
-        model_base = self._model_3d_path(models_dir).rstrip("/")
-        changed = 0
-        for board_path in sorted(self.project_path.glob("*.kicad_pcb")):
-            try:
-                content = board_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-
-            def _replace(match: re.Match) -> str:
-                original = match.group(1).strip()
-                norm = original.replace("\\", "/")
-                if "EASYEDA_MODELS" not in norm and "/3dmodels/" not in norm:
-                    return match.group(0)
-                name = Path(norm).name
-                if not name:
-                    return match.group(0)
-                target = models_dir / name
-                if not target.exists():
-                    return match.group(0)
-                updated = f"{model_base}/{name}"
-                if updated == original:
-                    return match.group(0)
-                return f'(model "{updated}"'
-
-            patched = re.sub(r'\(model\s+"([^"]+)"', _replace, content)
-            if patched != content:
-                try:
-                    board_path.write_text(patched, encoding="utf-8")
-                    changed += 1
-                except Exception:
-                    pass
-        if changed:
-            self.log(f"Normalized 3D model paths in {changed} board file(s).\n")
         return changed
 
     def warm_symbol_index_cache(
@@ -529,7 +494,7 @@ class KicadImporter:
         return out
 
     def _symbol_index_cache_path(self) -> Path:
-        return Path(PLUGIN_PATH) / "cache" / "kicad_symbol_index_v1.json"
+        return get_plugin_cache_path() / "kicad_symbol_index_v1.json"
 
     def _symbol_index_ttl_seconds(self, general: Dict) -> int:
         return max(0, self._as_int(general.get("kicad_symbol_index_ttl_sec"), 86400))
@@ -1685,7 +1650,6 @@ class KicadImporter:
                 python_exe=self.python_exe,
                 parent_window=self.parent_window,
                 scope=self.scope,
-                lib_dir=self.lib_dir,
             )
             # Fetch EasyEDA data first — used both for KiCad builtin meta enrichment
             # and as the source for EasyEDA conversion fallback.
@@ -1949,7 +1913,6 @@ class KicadImporter:
                         # direct LCSC API download using the model UUID from device.json.
                         self._download_3d_model_fallback(attrs, model_title, models_dir)
                     self._normalize_footprint_model_paths(footprint_dir, models_dir)
-                    self._normalize_board_model_paths(models_dir)
 
             self._apply_symbol_metadata(
                 symbol_lib_path=symbol_lib_path,

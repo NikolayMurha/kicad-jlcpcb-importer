@@ -22,13 +22,14 @@ from .events import (
     DownloadStartedEvent,
     MessageEvent,
 )
-from .helpers import PLUGIN_PATH, dict_factory, natural_sort_collation
+from .helpers import dict_factory, natural_sort_collation
+from .plugin_paths import get_plugin_data_path
 from .part_search import SEARCH_COLUMNS, build_parts_search_query
 from ..importers.unzip_parts import unzip_parts
 
 
 def _require_requests():
-    """Load requests after the runtime dependency installer has run."""
+    """Load requests from the KiCad-managed IPC environment."""
 
     global requests
     if requests is None:
@@ -62,7 +63,7 @@ class Library:
         self.parent = parent
         self.order_by = "LCSC Part"
         self.order_dir = "ASC"
-        self.datadir = os.path.join(PLUGIN_PATH, "jlcpcb")
+        self.datadir = str(get_plugin_data_path())
         self.partsdb_file = os.path.join(self.datadir, "parts-fts5.db")
         self.rotationsdb_file = os.path.join(self.datadir, "rotations.db")
         self.localcorrectionsdb_file = os.path.join(

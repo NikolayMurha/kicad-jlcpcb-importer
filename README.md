@@ -6,16 +6,18 @@ Thanks and credit to the original project that inspired this work:
 [Bouni/bouni-kicad-repository](https://github.com/Bouni/bouni-kicad-repository)
 
 - Supported platforms: Linux, macOS, and Windows
-- Supported KiCad versions: KiCad 9 and newer
+- Supported KiCad versions: KiCad 10 and newer
+- Integration: KiCad IPC API (`kipy`), running out of process; the legacy
+  in-process `pcbnew.ActionPlugin` entrypoint is not used.
 - Python-level CI runs on all three platforms. KiCad GUI/runtime behavior is
   validated separately because KiCad is not installed in CI.
 
 ## What it does
 
-- Search LCSC/JLCPCB catalog and assign LCSC numbers to footprints
+- Search the LCSC/JLCPCB catalog
 - Import symbols, footprints, and 3D models via the built-in EasyEDA Pro backend
 - In `KiCad` output mode: try matching built-in KiCad symbols/footprints first (common R/C/L/diode/transistor/IC), then fallback to EasyEDA conversion
-- Choose where to store generated libraries: Project or System (KiCad 9 3rd‑party locations)
+- Choose where to store generated libraries: Project or System (KiCad 10 3rd‑party locations)
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
 - Configurable library prefix (default: `JLCPCB`) and project library folder (default: `library`)
 
@@ -24,7 +26,7 @@ Thanks and credit to the original project that inspired this work:
 When `general.lib_format = "kicad"`:
 
 - `general.kicad_builtin_first` (default `true`) enables built-in KiCad lookup before EasyEDA fallback.
-- Symbol index cache is persisted to plugin folder (`<plugin>/cache/kicad_symbol_index_v1.json`) with TTL.
+- Symbol index cache is persisted in the directory assigned by KiCad's IPC API with TTL.
 - `general.kicad_symbol_index_ttl_sec` (default `86400`) controls symbol index cache lifetime.
 - `general.kicad_symbol_index_max_libs` limits number of symbol libraries used for index building.
 - `general.kicad_footprint_fuzzy_max_libs` / `general.kicad_footprint_fuzzy_max_files_per_lib` limit fuzzy footprint scanning.
@@ -33,9 +35,13 @@ When `general.lib_format = "kicad"`:
   - `["Resistor_SMD:R_${package}_*"]`
   - `["Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"]`
 
-## Limitations
+## Requirements and limitations
 
-- KiCad 9 currently does not provide a Python API to force refresh or reload library tables (symbols/footprints) at runtime.
+- Enable the IPC API in KiCad under `Preferences → Preferences → Plugins`.
+- KiCad's Plugin and Content Manager creates the plugin environment and installs
+  `requirements.txt` before launch. This includes `kicad-python`, wxPython, and
+  OpenCascade bindings used for STEP normalization.
+- KiCad currently does not provide an IPC API to force refresh or reload library tables (symbols/footprints) at runtime.
 - After importing a component (and updating `sym-lib-table` / `fp-lib-table` on disk), restart KiCad or reopen the project to see newly added libraries in browsers and pickers.
 - In System storage mode, KiCad auto‑scans configured 3rd‑party folders and applies your configured nickname prefix, but visibility in the current session may still require a restart.
 
@@ -80,44 +86,35 @@ https://raw.githubusercontent.com/NikolayMurha/kicad-repository/main/repository.
 
 From there you can install the plugin via the GUI.
 
-### Git
+### Git (development)
 
-Simply clone this repo into your `scripting/plugins` folder.
+Clone this repository into KiCad 10's IPC plugin folder. Unlike old Action
+Plugins, it must not be installed under `scripting/plugins`.
 
 #### Linux
 
 ```sh
-cd /home/{username}/.local/share/kicad/{version}/scripting/plugins
+cd /home/{username}/.local/share/kicad/10.0/plugins
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
 #### macOS
 
 ```sh
-cd ~/Documents/KiCad/{version}/scripting/plugins
+cd ~/Documents/KiCad/10.0/plugins
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-cd "$env:USERPROFILE\Documents\KiCad\{version}\scripting\plugins"
+cd "$env:APPDATA\kicad\10.0\plugins"
 git clone https://github.com/NikolayMurha/kicad-jlcpcb-importer.git
 ```
 
-You may need to create the `scripting/plugins` folder if it does not exist.
-
-### Flatpak :warning:
-
-The Flatpak installation of KiCad may not provide `pip`. The plugin first tries
-its automatic dependency installer, including the Flatpak user Python location.
-If that fails, run:
-
-1. `flatpak run --command=sh org.kicad.KiCad`
-2. `python -m ensurepip --upgrade`
-3. `/var/data/python/bin/pip3 install --target ~/.local/share/kicad/9.0/scripting/plugins/kicad-jlcpcb-importer/lib requests pycryptodome`
-
-Adjust the KiCad version and plugin directory name in step 3 when necessary.
+You may need to create the `plugins` folder if it does not exist. Restart KiCad
+after cloning so it discovers `plugin.json` and creates the managed Python
+environment.
 
 ## Usage 🥳
 
@@ -127,24 +124,24 @@ Checkout this screencast, it shows quickly how to use this plugin:
 
 > Note: usage instructions are intentionally omitted for now.
 
-## System library locations (KiCad 9)
+## System library locations (KiCad 10)
 
 When you choose System as the storage location, generated libraries are placed under KiCad’s 3rd‑party folders.
 
 - macOS
-  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/symbols/{plugin_dir_name}`
-  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/footprints/{plugin_dir_name}`
-  - `/Users/{user}/Documents/KiCad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
+  - `/Users/{user}/Documents/KiCad/10.0/3rdparty/symbols/{plugin_dir_name}`
+  - `/Users/{user}/Documents/KiCad/10.0/3rdparty/footprints/{plugin_dir_name}`
+  - `/Users/{user}/Documents/KiCad/10.0/3rdparty/3dmodels/{plugin_dir_name}`
 
 - Linux
-  - `~/.local/share/kicad/9.0/3rdparty/symbols/{plugin_dir_name}`
-  - `~/.local/share/kicad/9.0/3rdparty/footprints/{plugin_dir_name}`
-  - `~/.local/share/kicad/9.0/3rdparty/3dmodels/{plugin_dir_name}`
+  - `~/.local/share/kicad/10.0/3rdparty/symbols/{plugin_dir_name}`
+  - `~/.local/share/kicad/10.0/3rdparty/footprints/{plugin_dir_name}`
+  - `~/.local/share/kicad/10.0/3rdparty/3dmodels/{plugin_dir_name}`
 
 - Windows
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\symbols\{plugin_dir_name}`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\footprints\{plugin_dir_name}`
-  - `%USERPROFILE%\Documents\KiCad\9.0\3rdparty\3dmodels\{plugin_dir_name}`
+  - `%APPDATA%\kicad\10.0\3rdparty\symbols\{plugin_dir_name}`
+  - `%APPDATA%\kicad\10.0\3rdparty\footprints\{plugin_dir_name}`
+  - `%APPDATA%\kicad\10.0\3rdparty\3dmodels\{plugin_dir_name}`
 
 ## Icons
 
@@ -187,27 +184,15 @@ release tag and packages that tag only.
 - This fork focuses on searching LCSC parts and managing KiCad library assignments with a bundled EasyEDA Pro importer.
 - Fabrication (Gerber/CPL/BOM) features from the original tool are not included.
 
-## python libraries
+## Python dependencies
 
-lib/ contains the necessary python packages that may not be a part of the KiCad python distribution.
+Runtime packages are declared in `requirements.txt`. KiCad 10 installs them into
+an isolated environment for this IPC plugin. The repository no longer vendors
+or updates packages in a plugin-local `lib/` directory at runtime.
 
-These packages include:
-
-- packaging
-
-To install a package, such as 'packaging':
-
-```python
-pip install packaging --target ./lib
-```
-
-To update these packages:
-
-```python
-pip install packaging --upgrade --target ./lib
-```
-
-Future versions of KiCad may have support for a requires.txt to automate this process.
+New database and symbol-index caches use the persistent plugin directory
+provided by KiCad's IPC API. An existing `<plugin>/jlcpcb` database is reused in
+place so upgrades do not duplicate a multi-gigabyte cache.
 
 ## Standalone mode
 
@@ -231,64 +216,42 @@ The `{KiCad python}` should be used, this can be found at different locations de
 - Linux: `/usr/bin/python3`
 - Windows: `C:\Program Files\KiCad\{version}\bin\python.exe`
 
-#### Working directory
-
-The `{working directory}` should be your plugins directory, ie:
-
-- macOS: `~/Documents/KiCad/{version}/scripting/plugins/`
-- Linux: `~/.local/share/kicad/{version}/scripting/plugins/`
-- Windows: `%USERPROFILE%\Documents\KiCad\{version}\scripting\plugins\`
-
-> [!NOTE]  
-> `{version}` is 9.0 or newer.
-
-#### Plugin folder name
-
-The `{kicad-jlcpcb-importer folder name}` should be the name of the kicad-jlcpcb-importer folder.
-
-- For Kicad managed plugins this may be like
-
-> com_github_nikolaymurha_kicad-jlcpcb-importer
-
-- If you are developing kicad-jlcpcb-importer this is the folder you cloned the kicad-jlcpcb-importer as.
-
 #### Command line
 
-- Change to the working directory as noted above.
-- Run the python interpreter with the `{kicad-jlcpcb-importer folder name}` folder as a module.
+- Change to the repository root.
+- Run `__main__.py` with a Python environment containing wxPython and the other
+  packages from `requirements.txt`.
 
 For example:
 
 ```sh
-cd {working directory}
-{kicad_python} -m {kicad-jlcpcb-importer folder name}
+cd {kicad-jlcpcb-importer repository}
+{kicad_python} __main__.py
 ```
 
 For example on Mac:
 
 ```sh
-/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 -m kicad-jlcpcb-importer
+/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 __main__.py
 ```
 
 For example on Linux:
 
 ```sh
-cd ~/.local/share/kicad/9.0/scripting/plugins/ && python -m kicad-jlcpcb-importer
+python3 __main__.py
 ```
 
 For example on Windows PowerShell:
 
 ```powershell
-cd "$env:USERPROFILE\Documents\KiCad\9.0\scripting\plugins"
-& "C:\Program Files\KiCad\9.0\bin\python.exe" -m kicad-jlcpcb-importer
+& "C:\Program Files\KiCad\10.0\bin\python.exe" __main__.py
 ```
 
 #### IDE
 
-- Configure the command line to be '{kicad_python} -m {kicad-jlcpcb-importer folder name}'
-- Set the working directory to {working directory}
+- Configure the command line as `{kicad_python} __main__.py`.
+- Set the working directory to the repository root.
 
 If using PyCharm or JetBrains IDEs, set the interpreter to KiCad's python, `{Kicad python}` and under 'run configuration' select Python.
 
-Click on 'script path' and change instead to 'module name',
-entering the name of the kicad-jlcpcb-importer folder, `{kicad-jlcpcb-importer folder name}`.
+Select `__main__.py` as the script path.

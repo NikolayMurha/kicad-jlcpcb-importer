@@ -8,11 +8,10 @@ import zipfile
 from logging import info, warning, debug, error
 from typing import Callable, Optional
 
-import pcbnew  # type: ignore
-
 from . import decryptor
 from ...core.lcsc_api import LCSC_API
 from ...core.helpers import strip_lcsc_suffix
+from ..step_utils import fixup_step_model
 
 _REQUESTS_IMPORT_ERROR = None
 _REQUESTS = None
@@ -33,7 +32,10 @@ def _load_requests():
 def _require_requests():
     req = _load_requests()
     if req is None:
-        msg = "Please install requests using: pip install requests --target ./lib"
+        msg = (
+            "requests is missing; reinstall the plugin from KiCad's "
+            "Plugin and Content Manager"
+        )
         raise Exception(msg) from _REQUESTS_IMPORT_ERROR
     return req
 
@@ -417,53 +419,20 @@ class ComponentLoader():
 
                 file_name = os.path.splitext( os.path.basename( kfilePath ) ) [0]
                 jfilePath = kfilePath + "_jlc"
-
-                debug( "Loading STEP model %s" % (file_name) )
-                model: pcbnew.UTILS_STEP_MODEL = pcbnew.UTILS_STEP_MODEL.LoadSTEP(jfilePath)
-
-                if not model:
-                    error( "Error loading model '%s'" % (file_name) )
-                    return
-                
-                debug( "Converting STEP model '%s'" % (file_name) )
-                bbox: pcbnew.UTILS_BOX3D = model.GetBoundingBox()
-
                 try:
-                    if directUuid in uuidsToTransform:
-                        # Convert mils to mm
-                        fitXmm = uuidsToTransform[directUuid][0] / 39.37
-                        fitYmm = uuidsToTransform[directUuid][1] / 39.37
-
-                        bsize: pcbnew.VECTOR3D = bbox.GetSize()
-                        scaleFactorX = fitXmm / bsize.x
-                        scaleFactorY = fitYmm / bsize.y
-                        scaleFactor = ( scaleFactorX + scaleFactorY ) / 2
-
-                        debug( "Dimensions %f %f factors %f %f avg %f model '%s'" %
-                            (fitXmm, fitYmm, scaleFactorX, scaleFactorY, scaleFactor, file_name) )
-
-                        if abs( scaleFactorX - scaleFactorY ) > 0.1:
-                            warning( "Scale factors do not match: X %.3f; Y %.3f for model '%s'." %
-                                (scaleFactorX, scaleFactorY, file_name) )
-                            warning( "**** The model '%s' might be misoriented! ****" % (file_name) )
-                        elif abs( scaleFactor - 1.0 ) > 0.01:
-                            warning( "Scaling '%s' by %f" % (file_name, scaleFactor) )
-                            model.Scale( scaleFactor )
-                        else:
-                            debug( "No scaling for %s" % (file_name) )
-
+                    fit_dims = None
+                    if directUuid in uuidsToTransform and len(uuidsToTransform[directUuid]) >= 2:
+                        fit_dims = (
+                            uuidsToTransform[directUuid][0],
+                            uuidsToTransform[directUuid][1],
+                        )
+                    debug("Converting STEP model '%s'" % file_name)
+                    if not fixup_step_model(jfilePath, fit_dims, output_path=kfilePath):
+                        raise RuntimeError("STEP conversion failed")
                 except Exception as e:
                     traceback.print_exc()
-                    error( "Error scaling model '%s': %s" % (file_name, str(e)) )
+                    error("Error converting model '%s': %s" % (file_name, str(e)))
                     return
-
-                newbbox          = model.GetBoundingBox()
-                center: pcbnew.VECTOR3D = newbbox.GetCenter()
-
-                model.Translate( -center.x, -center.y, -newbbox.Min().z )
-
-                debug( "Saving STEP model %s" % (file_name) )
-                model.SaveSTEP( kfilePath )
 
                 # Delete the temporary JLC file after successful conversion
                 try:

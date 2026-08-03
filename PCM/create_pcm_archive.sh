@@ -37,10 +37,10 @@ mkdir -p "$RESOURCE_ROOT"
 echo "Copy files to destination"
 cp VERSION "$PLUGIN_ROOT"
 cp ./*.py "$PLUGIN_ROOT"
+cp plugin.json "$PLUGIN_ROOT/plugin.json"
 cp requirements.txt "$PLUGIN_ROOT"
 cp settings.default.json "$PLUGIN_ROOT/settings.default.json"
 cp -R src icons images "$PLUGIN_ROOT"
-mkdir -p "$PLUGIN_ROOT/lib"
 find "$PLUGIN_ROOT" -type f \( -name '*.pyc' -o -name '.DS_Store' -o -name 'test_*.py' -o -name 'pytest.ini' \) -delete
 find "$PLUGIN_ROOT" -depth -type d -name '__pycache__' -empty -delete
 # Include an icon in the PCM archive resources. Prefer PCM/icon.png; fall back to PCM/jlcpcb.png.
@@ -60,7 +60,6 @@ echo "Modify archive metadata.json"
 metadata_tmp="$ARCHIVE_ROOT/metadata.json.tmp"
 sed \
   -e "s|VERSION_HERE|$VERSION|g" \
-  -e 's/"kicad_version": "9.0",/"kicad_version": "9.0"/g' \
   -e '/SHA256_HERE/d' \
   -e '/DOWNLOAD_SIZE_HERE/d' \
   -e '/DOWNLOAD_URL_HERE/d' \

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .helpers import strip_lcsc_suffix
+from .platform_support import detected_kicad_major, resolve_system_library_root
 from ..ui.footprint_editor import FootprintEditor
 
 # ---------------------------------------------------------------------------
@@ -18,7 +19,9 @@ from ..ui.footprint_editor import FootprintEditor
 def _kicad_dirs(kind: str) -> List[str]:
     """Return candidate paths for built-in KiCad symbol or footprint libraries."""
     paths: List[str] = []
-    for ver in ("10", "9", "8", "7", "6"):
+    major = str(detected_kicad_major())
+    versions = tuple(dict.fromkeys((major, "10")))
+    for ver in versions:
         env = os.environ.get(f"KICAD{ver}_{kind}_DIR")
         if env:
             paths.append(env)
@@ -27,18 +30,14 @@ def _kicad_dirs(kind: str) -> List[str]:
             "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
             "/usr/share/kicad/symbols",
             "/usr/local/share/kicad/symbols",
-            r"C:\Program Files\KiCad\10.0\share\kicad\symbols",
-            r"C:\Program Files\KiCad\9.0\share\kicad\symbols",
-            r"C:\Program Files\KiCad\8.0\share\kicad\symbols",
+            rf"C:\Program Files\KiCad\{major}.0\share\kicad\symbols",
         ]
     else:
         paths += [
             "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
             "/usr/share/kicad/footprints",
             "/usr/local/share/kicad/footprints",
-            r"C:\Program Files\KiCad\10.0\share\kicad\footprints",
-            r"C:\Program Files\KiCad\9.0\share\kicad\footprints",
-            r"C:\Program Files\KiCad\8.0\share\kicad\footprints",
+            rf"C:\Program Files\KiCad\{major}.0\share\kicad\footprints",
         ]
     return [p for p in paths if os.path.isdir(p)]
 
@@ -50,18 +49,24 @@ def resolve_uri(uri: str, project_path: Optional[Path] = None, table_dir: Option
         result = result.replace("${KIPRJMOD}", str(project_path))
     sym_dirs = _kicad_dirs("SYMBOL")
     fp_dirs = _kicad_dirs("FOOTPRINT")
-    for ver in ("10", "9", "8", "7", "6"):
-        if sym_dirs:
-            result = result.replace(f"${{KICAD{ver}_SYMBOL_DIR}}", sym_dirs[0])
-        if fp_dirs:
-            result = result.replace(f"${{KICAD{ver}_FOOTPRINT_DIR}}", fp_dirs[0])
-    # Resolve ${KICADx_3RD_PARTY} → user settings path / "3rdparty"
+    major = str(detected_kicad_major())
+    for ver in tuple(dict.fromkeys((major, "10"))):
+        symbol_dir = os.environ.get(f"KICAD{ver}_SYMBOL_DIR") or (sym_dirs[0] if sym_dirs else "")
+        footprint_dir = os.environ.get(f"KICAD{ver}_FOOTPRINT_DIR") or (fp_dirs[0] if fp_dirs else "")
+        if symbol_dir:
+            result = result.replace(f"${{KICAD{ver}_SYMBOL_DIR}}", symbol_dir)
+        if footprint_dir:
+            result = result.replace(f"${{KICAD{ver}_FOOTPRINT_DIR}}", footprint_dir)
+    # Resolve ${KICADx_3RD_PARTY} to KiCad's per-user package data root.
     if "${KICAD" in result and "3RD_PARTY" in result:
-        user_settings = get_user_settings_path()
-        if user_settings:
-            third_party = str(user_settings / "3rdparty")
-            for ver in ("10", "9", "8", "7", "6"):
-                result = result.replace(f"${{KICAD{ver}_3RD_PARTY}}", third_party)
+        for ver in tuple(dict.fromkeys((major, "10"))):
+            third_party = str(
+                resolve_system_library_root(
+                    Path.cwd(),
+                    version_text=f"{ver}.0",
+                )
+            )
+            result = result.replace(f"${{KICAD{ver}_3RD_PARTY}}", third_party)
     p = Path(result)
     if not p.is_absolute() and table_dir is not None:
         p = (Path(table_dir) / p).resolve()
@@ -71,17 +76,13 @@ def resolve_uri(uri: str, project_path: Optional[Path] = None, table_dir: Option
 
 def get_user_settings_path() -> Optional[Path]:
     """Return KiCad user settings directory, or None if unavailable."""
-    try:
-        import pcbnew  # type: ignore
-
-        p = pcbnew.SETTINGS_MANAGER.GetUserSettingsPath()
-        if p:
-            return Path(p)
-    except Exception:
-        pass
+    configured = str(os.environ.get("KICAD_USER_SETTINGS_PATH", "")).strip()
+    if configured:
+        return Path(configured).expanduser()
 
     home = Path.home()
-    for ver in ("10.0", "9.0", "8.0", "7.0", "6.0"):
+    version = f"{detected_kicad_major()}.0"
+    for ver in tuple(dict.fromkeys((version, "10.0"))):
         for base in [
             home / ".config" / "kicad" / ver,
             home / "Library" / "Preferences" / "kicad" / ver,

@@ -5,13 +5,11 @@ import re
 import json
 import sys
 import logging
-import subprocess
 import threading
-import shlex
 from pathlib import Path
 import wx
 import wx.dataview as dv
-from typing import Optional
+from typing import Optional, Protocol
 
 from .partselector import PartSelectorDialog
 from .settings import SettingsDialog
@@ -23,6 +21,7 @@ from ..core.helpers import (
     sanitize_lib_name,
     as_bool,
 )
+from ..core.kicad_ipc import ProjectContext
 from ..core.events import (
     EVT_LOGBOX_APPEND_EVENT,
     EVT_MESSAGE_EVENT,
@@ -47,13 +46,12 @@ from ..core.library import Library, LibraryState
 from ..importers.importer import EasyedaImporter
 from ..importers.kicad.importer import KicadImporter
 
-import pcbnew as kicad_pcbnew  # pylint: disable=import-error
 
-class KicadProvider:
-    """KiCad provider for board access."""
+class KicadProvider(Protocol):
+    """Runtime boundary shared by IPC and standalone modes."""
 
-    def get_pcbnew(self):  # pragma: no cover - depends on KiCad runtime
-        return kicad_pcbnew
+    def get_project_context(self) -> ProjectContext:
+        """Return the active project's paths and file names."""
 
 
 class ToolsDialog(wx.Dialog):
@@ -151,11 +149,13 @@ class ToolsDialog(wx.Dialog):
 
 
 class AssignLCSCMainDialog(PartSelectorDialog):
-    """Main plugin window that focuses on assigning LCSC numbers without legacy mainwindow."""
+    """Main plugin window for catalog search and library import."""
 
     def __init__(self, kicad_provider: Optional[KicadProvider] = None):
         # Minimal context expected by PartSelectorDialog
-        self.pcbnew = (kicad_provider or KicadProvider()).get_pcbnew()
+        if kicad_provider is None:
+            raise RuntimeError("A KiCad IPC or standalone provider is required")
+        self.kicad_provider = kicad_provider
         self.window = self  # fallback until wx top-level is available
         self.scale_factor = 1.0
         self._library_rename_timer = None
@@ -177,7 +177,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         # Dependencies state
         self._deps_ready = False
         self._deps_prompted = False
-        self._deps_installing = False
         self._symbol_index_warmup_running = False
 
         # Build the PartSelectorDialog with self as the logical parent context
@@ -349,7 +348,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception:
             pass
 
-        # On first window launch, verify deps and offer installation if missing
+        # KiCad installs requirements before launching an IPC action. Verify the
+        # environment here so a broken installation has an actionable message.
         self._check_and_offer_install_deps()
         # Ensure UI matches current deps state
         self._update_select_enabled()
@@ -380,30 +380,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception:
             pass
         return sys.executable or "python3"
-
-    def _run_and_stream(self, cmd, env=None) -> int:
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-            )
-            if proc.stdout is not None:
-                for line in proc.stdout:
-                    self.log(line)
-            return proc.wait()
-        except Exception as e:
-            self.log(f"Execution error: {e}\n")
-            return 1
-
-    @staticmethod
-    def _format_cmd(cmd) -> str:
-        if sys.platform.startswith("win"):
-            return subprocess.list2cmdline(cmd)
-        return " ".join(shlex.quote(str(part)) for part in cmd)
 
     def _start_symbol_index_warmup(self, force: bool = False) -> None:
         general = (self.settings.get("general", {}) or {})
@@ -440,7 +416,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                     python_exe=self._resolve_python_exe(),
                     parent_window=self,
                     scope=scope,
-                    lib_dir=Path(PLUGIN_PATH) / "lib",
                 )
                 warmed = importer.warm_symbol_index_cache(progress_cb=_report)
                 if warmed:
@@ -544,21 +519,18 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         """Return the appropriate importer based on lib_format setting."""
         general = (self.settings.get("general", {}) or {})
         lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
-        lib_dir = Path(PLUGIN_PATH) / "lib"
         if lib_format == "kicad":
             return KicadImporter(
                 project_path=self.project_path,
                 python_exe=self._resolve_python_exe(),
                 parent_window=self,
                 scope=str(scope),
-                lib_dir=lib_dir,
             )
         return EasyedaImporter(
             project_path=self.project_path,
             python_exe=self._resolve_python_exe(),
             parent_window=self,
             scope=str(scope),
-            lib_dir=lib_dir,
         )
 
     def _import_parts_via_easyeda(self, rows):
@@ -684,8 +656,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             return "component import"
         if getattr(self.library, "state", None) == LibraryState.DOWNLOAD_RUNNING:
             return "database update"
-        if self._deps_installing:
-            return "dependency installation"
         if self._symbol_index_warmup_running:
             return "symbol index build"
         return ""
@@ -706,6 +676,9 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             if event.CanVeto():
                 event.Veto()
             self._show_close_blocked(work)
+            return
+        if self.IsModal():
+            self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()
 
@@ -842,19 +815,8 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     def _detect_project_context(self):
         """Detect project root and names robustly."""
-        # 1) Use KIPRJMOD when available
-        kiprjmod = os.environ.get("KIPRJMOD")
-        board = self.pcbnew.GetBoard()
-        if kiprjmod:
-            project_dir = kiprjmod
-        else:
-            try:
-                project_dir = os.getcwd()
-            except Exception:
-                project_dir = str(PLUGIN_PATH)
-        board_name = os.path.split(board.GetFileName())[1] if board else "board.kicad_pcb"
-        schematic_name = f"{board_name.split('.')[0]}.kicad_sch"
-        return project_dir, board_name, schematic_name
+        context = self.kicad_provider.get_project_context()
+        return str(context.project_path), context.board_name, context.schematic_name
 
     # Settings persistence
     # Project-level settings live under the current KiCad project directory.
@@ -2220,7 +2182,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
             except Exception:
                 pass
 
-    # Dependency check and interactive installer
+    # Dependency check. KiCad's IPC plugin manager owns installation and updates.
     def _check_and_offer_install_deps(self, force_prompt: bool = False):
         missing = []
         try:
@@ -2234,33 +2196,22 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 from Cryptodome.Cipher import AES  # noqa: F401
             except Exception:
                 missing.append("pycryptodome")
+        try:
+            import OCP  # noqa: F401
+        except Exception:
+            missing.append("cadquery-ocp")
         if missing:
             self._deps_ready = False
             self._update_select_enabled()
-            lib_dir = Path(PLUGIN_PATH) / "lib"
-            cmd = [
-                self._resolve_python_exe(),
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "--target",
-                str(lib_dir),
-                *missing,
-            ]
-            cmd_text = self._format_cmd(cmd)
             msg = (
-                "Missing dependencies for importer:\n"
+                "The KiCad-managed IPC environment is missing dependencies:\n"
                 f"- {', '.join(missing)}\n\n"
-                "Install them now? This will run:\n"
-                f"{cmd_text}\n"
+                "Reinstall or update the plugin from KiCad's Plugin and Content Manager."
             )
             prompt = force_prompt or not self._deps_prompted
             if prompt:
                 self._deps_prompted = True
-                choice = wx.MessageBox(msg, "Dependencies missing", style=wx.YES_NO | wx.ICON_WARNING)
-                if choice == wx.YES:
-                    self._install_requirements_async(missing)
+                wx.MessageBox(msg, "Dependencies missing", style=wx.OK | wx.ICON_ERROR)
             else:
                 try:
                     self.log(msg + "\n")
@@ -2285,82 +2236,6 @@ class AssignLCSCMainDialog(PartSelectorDialog):
         except Exception:
             pass
         self.library.update()
-
-    def _install_requirements_async(self, packages):
-        if self._deps_installing:
-            return
-        self._deps_installing = True
-
-        def _worker():
-            ok = self._install_requirements(packages)
-
-            def _after():
-                self._deps_installing = False
-                if ok:
-                    try:
-                        self.log("Dependencies installed.\n")
-                    except Exception:
-                        pass
-                    self._check_and_offer_install_deps(force_prompt=False)
-                else:
-                    wx.MessageBox(
-                        "Dependency installation failed. Check the log for details.",
-                        "Dependencies",
-                        wx.ICON_ERROR,
-                    )
-
-            wx.CallAfter(_after)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _install_requirements(self, packages):
-        if not packages:
-            return True
-        lib_dir = Path(PLUGIN_PATH) / "lib"
-        lib_dir.mkdir(parents=True, exist_ok=True)
-        python_exe = self._resolve_python_exe()
-        env = os.environ.copy()
-        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-        install_args = [
-            "install",
-            "--upgrade",
-            "--prefer-binary",
-            "--no-warn-script-location",
-            "--target",
-            str(lib_dir),
-            *packages,
-        ]
-
-        def _commands():
-            commands = [[python_exe, "-m", "pip", *install_args]]
-            if sys.platform.startswith("linux"):
-                for candidate in (
-                    Path("/var/data/python/bin/pip3"),
-                    Path("/var/data/python/bin/pip"),
-                ):
-                    if candidate.is_file() and os.access(candidate, os.X_OK):
-                        commands.append([str(candidate), *install_args])
-            return commands
-
-        def _try_install() -> bool:
-            for cmd in _commands():
-                try:
-                    self.log(f"Running: {self._format_cmd(cmd)}\n")
-                except Exception:
-                    pass
-                if self._run_and_stream(cmd, env=env) == 0:
-                    return True
-            return False
-
-        if not _try_install():
-            try:
-                self.log("pip failed, attempting ensurepip...\n")
-            except Exception:
-                pass
-            ensure_cmd = [python_exe, "-m", "ensurepip", "--upgrade"]
-            self._run_and_stream(ensure_cmd, env=env)
-            return _try_install()
-        return True
 
     def _update_select_enabled(self):
         try:
