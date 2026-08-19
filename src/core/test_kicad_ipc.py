@@ -82,25 +82,29 @@ class KicadIpcTests(unittest.TestCase):
         )
 
     def test_provider_builds_context_from_ipc_document(self):
-        root = Path("/tmp/ipc-project")
-        provider = KicadIpcProvider(_FakeClient(str(root)))
-        context = provider.get_project_context()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ipc-project"
+            provider = KicadIpcProvider(_FakeClient(str(root)))
+            context = provider.get_project_context()
 
-        self.assertEqual(context.project_path, root)
-        self.assertEqual(context.board_name, "demo.kicad_pcb")
-        self.assertEqual(context.schematic_name, "demo.kicad_sch")
+            self.assertEqual(context.project_path, root)
+            self.assertEqual(context.board_name, "demo.kicad_pcb")
+            self.assertEqual(context.schematic_name, "demo.kicad_sch")
 
     def test_provider_exports_path_environment(self):
-        root = Path("/tmp/ipc-project")
-        provider = KicadIpcProvider(_FakeClient(str(root)))
-        env: dict[str, str] = {}
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ipc-project"
+            provider = KicadIpcProvider(_FakeClient(str(root)))
+            env: dict[str, str] = {}
 
-        provider.prepare_environment(env)
+            provider.prepare_environment(env)
 
-        self.assertEqual(env["KIPRJMOD"], str(root))
-        self.assertEqual(env["KICAD_VERSION"], "10.0.5")
-        self.assertEqual(env["KICAD_CLI"], "/opt/kicad/kicad-cli")
-        self.assertEqual(env["JLCPCB_PLUGIN_SETTINGS_PATH"], "/tmp/jlcpcb-ipc-settings")
+            self.assertEqual(env["KIPRJMOD"], str(root))
+            self.assertEqual(env["KICAD_VERSION"], "10.0.5")
+            self.assertEqual(env["KICAD_CLI"], "/opt/kicad/kicad-cli")
+            self.assertEqual(
+                env["JLCPCB_PLUGIN_SETTINGS_PATH"], "/tmp/jlcpcb-ipc-settings"
+            )
 
     def test_unsaved_project_uses_board_file_directory(self):
         board_path = "/tmp/ipc-project/demo.kicad_pcb"
