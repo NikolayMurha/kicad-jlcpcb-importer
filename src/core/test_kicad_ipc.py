@@ -103,7 +103,8 @@ class KicadIpcTests(unittest.TestCase):
             self.assertEqual(env["KICAD_VERSION"], "10.0.5")
             self.assertEqual(env["KICAD_CLI"], "/opt/kicad/kicad-cli")
             self.assertEqual(
-                env["JLCPCB_PLUGIN_SETTINGS_PATH"], "/tmp/jlcpcb-ipc-settings"
+                env["JLCPCB_PLUGIN_SETTINGS_PATH"],
+                str(Path("/tmp/jlcpcb-ipc-settings")),
             )
 
     def test_unsaved_project_uses_board_file_directory(self):
