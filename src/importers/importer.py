@@ -27,13 +27,13 @@ class EasyedaImporter:
         self._impl = self._select_impl()
 
     def _select_impl(self):
-        fmt = "easyeda_pro"
+        fmt = "kicad"
         try:
             settings = getattr(self.parent_window, "settings", {}) or {}
             general = settings.get("general", {}) or {}
-            fmt = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+            fmt = str(general.get("lib_format", "kicad")).strip().lower()
         except Exception:
-            fmt = "easyeda_pro"
+            fmt = "kicad"
 
         if fmt == "kicad":
             return KicadImporter(

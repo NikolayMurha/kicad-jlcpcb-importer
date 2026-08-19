@@ -12,6 +12,7 @@ DEFAULT_SYMBOL_MAP: Dict[str, List[str]] = {
     "resistor": ["Device:R", "Device:R_Small", "Device:R_US"],
     "capacitor": ["Device:C", "Device:C_Small", "Device:C_Polarized"],
     "inductor": ["Device:L", "Device:L_Small"],
+    "ferrite_bead": ["Device:FerriteBead", "Device:L", "Device:L_Small"],
     "diode": ["Device:D", "Device:D_Small"],
     "zener": ["Device:D_Zener", "Device:D_Zener_Small", "Device:D"],
     "tvs": ["Device:D_TVS", "Device:D_Zener", "Device:D"],
@@ -27,7 +28,7 @@ _REF_PREFIX_KIND_MAP: Dict[str, str] = {
     "R": "resistor",
     "C": "capacitor",
     "L": "inductor",
-    "FB": "inductor",
+    "FB": "ferrite_bead",
     "D": "diode",
     "ZD": "zener",
     "LED": "led",
@@ -208,7 +209,9 @@ def component_kind(
         return "resistor"
     if re.search(r"\b(capacitor|capacitance)\b", text):
         return "capacitor"
-    if re.search(r"\b(inductor|ferrite|bead)\b", text):
+    if re.search(r"\b(ferrite|ferrite\s+beads?|beads?)\b", text):
+        return "ferrite_bead"
+    if re.search(r"\binductor\b", text):
         return "inductor"
     if re.search(r"\bled\b", text):
         return "led"

@@ -842,7 +842,7 @@ class SettingsDialog(wx.Dialog):
         self.update_hide_button_labels(as_bool(general.get("hide_button_labels"), default=False))
         self.update_debug_log(as_bool(general.get("debug_log"), default=False))
         self.update_lib_prefix(self._initial_library_name)
-        self.update_lib_format(general.get("lib_format", "easyeda_pro"))
+        self.update_lib_format(general.get("lib_format", "kicad"))
         self.update_kicad_symbol_matching_enabled(
             as_bool(general.get("kicad_symbol_matching_enabled"), default=False)
         )
@@ -1002,7 +1002,7 @@ class SettingsDialog(wx.Dialog):
 
         if scope_key == "project":
             self._lib_path_label.SetLabel("Library dir name:")
-            self.lib_path_ctrl.SetHint("library")
+            self.lib_path_ctrl.SetHint("libraries")
             self.lib_path_ctrl.SetToolTip(wx.ToolTip(
                 "Directory name under ${KIPRJMOD} where plugin libraries are stored."
             ))
@@ -1088,7 +1088,7 @@ class SettingsDialog(wx.Dialog):
             key = value.strip().lower()
             idx = 1 if key == "kicad" else 0
         else:
-            idx = int(value) if value in (0, 1) else 0
+            idx = int(value) if value in (0, 1) else 1
         try:
             self.lib_format_ctrl.SetSelection(idx)
         except Exception:

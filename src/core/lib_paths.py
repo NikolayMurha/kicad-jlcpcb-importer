@@ -8,8 +8,8 @@ from typing import Callable
 from .shared_lib import read_shared_meta
 
 
-DEFAULT_LIB_PATH = "${KIPRJMOD}/library"
-DEFAULT_LIB_DIR_NAME = "library"
+DEFAULT_LIB_PATH = "${KIPRJMOD}/libraries"
+DEFAULT_LIB_DIR_NAME = "libraries"
 DEFAULT_LIB_NAME = "JLCPCB"
 
 
@@ -85,7 +85,14 @@ def _project_name(project_path: Path | str | None, fallback: str) -> str:
     if project_path is None:
         return fallback
     try:
-        name = Path(project_path).resolve().name
+        path = Path(project_path).resolve()
+        if path.is_file() and path.suffix == ".kicad_pro":
+            name = path.stem
+        elif path.is_dir():
+            project_files = sorted(path.glob("*.kicad_pro"))
+            name = project_files[0].stem if len(project_files) == 1 else path.name
+        else:
+            name = path.name
         return name.strip() or fallback
     except Exception:
         return fallback

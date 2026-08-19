@@ -16,7 +16,7 @@ from ...core.shared_lib import (
     ensure_project_table_links,
     ensure_shared_meta,
 )
-from .component_loader import ComponentLoader
+from .component_loader import CadDataUnavailableError, ComponentLoader
 
 
 class EasyedaProImporter:
@@ -34,6 +34,7 @@ class EasyedaProImporter:
         # support both names for clarity
         self.parent_window = parent_window
         self.scope = str(scope).lower()
+        self.last_error: Optional[Exception] = None
 
     def _compute_outputs(self) -> Tuple[Path, Path, Path, str, Path]:
 
@@ -96,6 +97,7 @@ class EasyedaProImporter:
         log_saved_path: bool = True,
         skip_models: bool = False,
     ) -> Tuple[bool, Path]:
+        self.last_error = None
         symbols_path, _footprints_path, models_3d_path, target_name, lib_root = self._compute_outputs()
         target_path = symbols_path
         elibz_path = target_path / f"{target_name}.elibz"
@@ -122,6 +124,10 @@ class EasyedaProImporter:
                 debug_log=debug_log,
             )
             loader.downloadAll([lcsc_id], skip_models=skip_models)
+            if not elibz_path.is_file():
+                raise RuntimeError(
+                    f"ComponentLoader completed without creating {elibz_path.name}"
+                )
             if update_tables and (not self.is_system_scope):
                 try:
                     general = (getattr(self.parent_window, "settings", {}) or {}).get("general", {}) or {}
@@ -156,7 +162,12 @@ class EasyedaProImporter:
             if log_saved_path:
                 self.log(f"ComponentLoader saved library: {elibz_path}\n")
             return True, elibz_path
+        except CadDataUnavailableError as exc:
+            self.last_error = exc
+            self.log(f"No EasyEDA CAD data for {lcsc_id}: {exc}\n")
+            return False, elibz_path
         except Exception as exc:
+            self.last_error = exc
             self.log(f"ComponentLoader import failed: {exc}\n")
             return False, elibz_path
 

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from . import step_utils
 from .step_utils import fixup_step_model
 
 
@@ -108,7 +109,7 @@ class StepUtilsTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "source.step"
             destination = Path(temp_dir) / "normalized.step"
-            with patch("src.importers.step_utils._load_ocp", return_value=_fake_ocp()):
+            with patch.object(step_utils, "_load_ocp", return_value=_fake_ocp()):
                 result = fixup_step_model(
                     source,
                     fit_dims_mils=(787.4, 1574.8),

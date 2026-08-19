@@ -42,6 +42,10 @@ def _require_requests():
 MODELS_DIR = "3dmodels"
 
 
+class CadDataUnavailableError(RuntimeError):
+    """An LCSC code has no importable EasyEDA CAD device mapping."""
+
+
 def _patch_esym_attrs(data_str: str, symbol_value: str = "") -> str:
     """Normalize value-related ATTR records in an .esym JSONL file.
 
@@ -167,9 +171,13 @@ class ComponentLoader():
             if not skip_models:
                 self.downloadModels(libDeviceFile, fetched_3dmodels)
             self.progress(100, 100)
+        except CadDataUnavailableError as exc:
+            warning(str(exc))
+            raise
         except Exception:
             traceback.print_exc()
             error(f"Failed to download components: {traceback.format_exc()}")
+            raise
 
     def downloadSymFp(self, components):
         info("Fetching info...")
@@ -192,8 +200,13 @@ class ComponentLoader():
 
             self._debug_json("searchByCodes", found)
 
-            if not found.get("success") or not found.get("result"):
+            if not found.get("success"):
                 raise Exception(f"Unable to fetch device info: {found}")
+            if not found.get("result"):
+                codes = ", ".join(code_components)
+                raise CadDataUnavailableError(
+                    f"EasyEDA has no symbol/footprint data for {codes}"
+                )
 
             # Append fetched UUIDs to direct_uuids
             for entry in found["result"]:

@@ -1,9 +1,10 @@
 {
   "general": {
     "library_scope": "project",
-    "lib_prefix": "JLCPCB",
-    "lib_path": "${KIPRJMOD}/library",
-    "lib_format": "easyeda_pro",
+    "lib_prefix": "",
+    "lib_path": "${KIPRJMOD}/libraries",
+    "lib_format": "kicad",
+    "group_by_category": false,
     "kicad_builtin_first": true,
     "kicad_symbol_matching_enabled": false,
     "kicad_symbol_index_ttl_sec": 86400,

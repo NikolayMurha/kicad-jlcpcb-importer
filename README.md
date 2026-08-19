@@ -19,11 +19,11 @@ Thanks and credit to the original project that inspired this work:
 - In `KiCad` output mode: try matching built-in KiCad symbols/footprints first (common R/C/L/diode/transistor/IC), then fallback to EasyEDA conversion
 - Choose where to store generated libraries: Project or System (KiCad 10 3rd‑party locations)
 - Auto‑update project library tables (sym‑lib‑table / fp‑lib‑table) and fix 3D paths
-- Configurable library prefix (default: `JLCPCB`) and project library folder (default: `library`)
+- Configurable library prefix (empty by default) and project library folder (default: `libraries`)
 
 ### KiCad-first mapping settings
 
-When `general.lib_format = "kicad"`:
+The default output mode is `general.lib_format = "kicad"`:
 
 - `general.kicad_builtin_first` (default `true`) enables built-in KiCad lookup before EasyEDA fallback.
 - Symbol index cache is persisted in the directory assigned by KiCad's IPC API with TTL.

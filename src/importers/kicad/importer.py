@@ -58,6 +58,7 @@ from ...core.shared_lib import (
 )
 from ...ui.footprint_editor import FootprintEditor
 from ...ui.symbol_editor import SymbolEditor
+from ..easyedapro.component_loader import CadDataUnavailableError
 from ..easyedapro.importer import EasyedaProImporter
 from ...core.lcsc_api import LCSC_API
 from ..step_utils import fixup_step_model
@@ -1477,8 +1478,17 @@ class KicadImporter:
         lib_name: str,
     ) -> Tuple[Optional[str], Optional[Path], Optional[str], Optional[str]]:
         description = str(meta.get("description") or "").strip()
+        category = " ".join(
+            filter(
+                None,
+                (
+                    str(meta.get("first_category") or "").strip(),
+                    str(meta.get("second_category") or "").strip(),
+                ),
+            )
+        )
         attrs = self._parse_attributes_map(str(meta.get("attributes_json") or ""))
-        component_kind = self._component_kind("", description, attrs, meta=meta)
+        component_kind = self._component_kind(category, description, attrs, meta=meta)
         package_candidates = self._extract_package_candidates(meta, attrs)
         self.log(
             f"KiCad builtin: kind={component_kind}, "
@@ -1627,6 +1637,125 @@ class KicadImporter:
             )
         return symbol_name, dest_mod, source_symbol_ref, source_fp_ref
 
+    def _catalog_meta(self, lcsc_id: str) -> Dict:
+        """Build matching metadata from the local parts database."""
+
+        library = getattr(self.parent_window, "library", None)
+        get_details = getattr(library, "get_part_details", None)
+        if not callable(get_details):
+            return {}
+        try:
+            details = get_details(lcsc_id) or {}
+        except Exception as exc:
+            self.log(f"Unable to read local catalog metadata for {lcsc_id}: {exc}\n")
+            return {}
+        if not details:
+            return {}
+
+        attrs = {
+            "LCSC Part": str(details.get("lcsc") or lcsc_id).strip().upper(),
+            "MFR.Part": str(details.get("part_no") or "").strip(),
+            "Package": str(details.get("package") or "").strip(),
+            "Description": str(details.get("description") or "").strip(),
+            "First Category": str(details.get("category") or "").strip(),
+            "Library Type": str(details.get("type") or "").strip(),
+        }
+        attrs = {key: value for key, value in attrs.items() if value}
+        return {
+            "lcsc_part": attrs.get("LCSC Part", lcsc_id),
+            "mfr_part": attrs.get("MFR.Part", ""),
+            "package": attrs.get("Package", ""),
+            "description": attrs.get("Description", ""),
+            "first_category": attrs.get("First Category", ""),
+            "library_type": attrs.get("Library Type", ""),
+            "attributes_json": json.dumps(attrs, ensure_ascii=False),
+        }
+
+    def _import_part_from_catalog_metadata(
+        self,
+        lcsc_id: str,
+        general: Dict,
+        symbol_lib_path: Path,
+        footprint_dir: Path,
+        footprints_root: Path,
+        models_root: Path,
+        lib_name: str,
+        lib_root: Path,
+    ) -> Tuple[bool, Path]:
+        """Fallback to standard KiCad libraries when EasyEDA has no CAD data."""
+
+        meta = self._catalog_meta(lcsc_id)
+        if not meta:
+            self.log(
+                f"Catalog entry exists for {lcsc_id}, but its metadata is unavailable to the importer.\n"
+            )
+            return False, lib_root
+        if not self._kicad_builtin_first_enabled(general):
+            self.log(
+                "Catalog-only fallback is disabled because KiCad builtin lookup is disabled.\n"
+            )
+            return False, lib_root
+        if not self._kicad_symbol_matching_enabled(general):
+            self.log(
+                "Catalog-only fallback requires 'KiCad symbol matching' in Settings; "
+                "no fabricated symbol was imported.\n"
+            )
+            return False, lib_root
+
+        self.log(
+            f"EasyEDA CAD is unavailable for {lcsc_id}; trying standard KiCad libraries "
+            "using local catalog metadata.\n"
+        )
+        (
+            symbol_name,
+            footprint_path,
+            source_symbol_ref,
+            source_footprint_ref,
+        ) = self._import_part_via_builtin_kicad(
+            lcsc_id=lcsc_id,
+            meta=meta,
+            general=general,
+            symbol_lib_path=symbol_lib_path,
+            footprint_dir=footprint_dir,
+            lib_name=lib_name,
+        )
+        if not symbol_name or footprint_path is None:
+            self.log(
+                f"No safe standard KiCad symbol/footprint pair matched {lcsc_id}; "
+                "nothing was imported.\n"
+            )
+            return False, lib_root
+
+        if source_symbol_ref:
+            meta["source_symbol_ref"] = source_symbol_ref
+        if source_footprint_ref:
+            meta["source_footprint_ref"] = source_footprint_ref
+        self._apply_symbol_metadata(
+            symbol_lib_path=symbol_lib_path,
+            symbol_name=symbol_name,
+            meta=meta,
+            fallback_value=symbol_name,
+            lcsc_id=lcsc_id,
+        )
+        if self.is_system_scope:
+            FootprintEditor(self.project_path, log=self.log).rewrite_system_3d_model_paths(
+                footprints_root / lib_name,
+                models_root / lib_name,
+            )
+        else:
+            self._postprocess_non_system_import(
+                footprint_dir=footprint_dir,
+                lib_root=lib_root,
+                models_root=models_root,
+                general=general,
+            )
+        self.log(
+            f"Catalog-only KiCad mapping matched symbol '{symbol_name}' and "
+            f"footprint '{footprint_path.stem}'.\n"
+        )
+        self.log(f"Generated KiCad libraries under: {lib_root}\n")
+        return True, lib_root
+
     def _import_part_via_elibz(self, lcsc_id: str) -> Tuple[bool, Path]:
         general = self._general_settings()
         symbols_root, footprints_root, models_root, lib_name, lib_root = self._compute_outputs("")
@@ -1664,6 +1793,17 @@ class KicadImporter:
                     skip_models=True,
                 )
                 if not ok:
+                    if isinstance(elibz_importer.last_error, CadDataUnavailableError):
+                        return self._import_part_from_catalog_metadata(
+                            lcsc_id=lcsc_id,
+                            general=general,
+                            symbol_lib_path=symbol_lib_path,
+                            footprint_dir=footprint_dir,
+                            footprints_root=footprints_root,
+                            models_root=models_root,
+                            lib_name=lib_name,
+                            lib_root=lib_root,
+                        )
                     return False, lib_root
 
                 payload = load_elibz_payload(elibz_path)

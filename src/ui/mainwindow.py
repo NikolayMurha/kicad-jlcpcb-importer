@@ -383,7 +383,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
     def _start_symbol_index_warmup(self, force: bool = False) -> None:
         general = (self.settings.get("general", {}) or {})
-        lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+        lib_format = str(general.get("lib_format", "kicad")).strip().lower()
         if lib_format != "kicad":
             return
         if not as_bool(general.get("kicad_builtin_first"), default=True):
@@ -518,7 +518,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
     def _make_importer(self, scope: str):
         """Return the appropriate importer based on lib_format setting."""
         general = (self.settings.get("general", {}) or {})
-        lib_format = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+        lib_format = str(general.get("lib_format", "kicad")).strip().lower()
         if lib_format == "kicad":
             return KicadImporter(
                 project_path=self.project_path,
@@ -949,7 +949,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
                 shared_root,
                 use_project_relative=False,
                 uri_prefix=shared_uri_prefix,
-                lib_format=str(general.get("lib_format", "easyeda_pro")).strip().lower(),
+                lib_format=str(general.get("lib_format", "kicad")).strip().lower(),
             )
             ensure_project_table_links(
                 Path(self.project_path),
@@ -1112,7 +1112,7 @@ class AssignLCSCMainDialog(PartSelectorDialog):
 
             general = self.settings.get("general", {}) or {}
             scope = str(general.get("library_scope", "project")).strip().lower()
-            fmt = str(general.get("lib_format", "easyeda_pro")).strip().lower()
+            fmt = str(general.get("lib_format", "kicad")).strip().lower()
             if scope == "shared":
                 _root, uri_prefix = resolve_lib_root(general, Path(self.project_path))
                 manager = LibTablesManager(lib_root, log=self.log)

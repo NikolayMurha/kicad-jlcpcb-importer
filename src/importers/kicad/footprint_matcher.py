@@ -6,7 +6,16 @@ import re
 from typing import Dict, Iterable, List, Tuple
 
 
-PASSIVE_KINDS = {"resistor", "capacitor", "inductor", "led", "diode", "fet", "bjt"}
+PASSIVE_KINDS = {
+    "resistor",
+    "capacitor",
+    "inductor",
+    "ferrite_bead",
+    "led",
+    "diode",
+    "fet",
+    "bjt",
+}
 
 CHIP_SIZE_IMPERIAL_TO_METRIC: Dict[str, str] = {
     "0201": "0603",
@@ -28,6 +37,7 @@ DEFAULT_FP_LIB_PRIORITY: Dict[str, List[str]] = {
     "resistor": ["Resistor_SMD", "Resistor_THT"],
     "capacitor": ["Capacitor_SMD", "Capacitor_THT"],
     "inductor": ["Inductor_SMD", "Inductor_THT"],
+    "ferrite_bead": ["Inductor_SMD", "Inductor_THT"],
     "diode": ["Diode_SMD", "Diode_THT"],
     "led": ["LED_SMD", "LED_THT"],
     "bjt": ["Package_TO_SOT_SMD", "Package_TO_SOT_THT"],
