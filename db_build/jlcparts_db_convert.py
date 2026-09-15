@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -59,21 +60,27 @@ def _find_7zip() -> str:
 
 def _volume_count(seven_zip: str, archive: Path) -> int:
     result = subprocess.run(
-        [seven_zip, "l", str(archive)], capture_output=True, text=True, check=False
+        [seven_zip, "l", "-slt", str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    if result.returncode != 0 and "ERROR = Missing volume" not in result.stdout:
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    missing_volume = "ERROR = Missing volume" in output
+    if result.returncode != 0 and not missing_volume:
         raise click.ClickException(
-            f"Unable to inspect {archive.name}: {result.stdout} {result.stderr}"
+            f"Unable to inspect {archive.name}: {output.strip()}"
         )
-    for line in result.stdout.splitlines():
-        if "Volume Index =" in line:
-            try:
-                return int(line.split("=")[-1].strip())
-            except ValueError as exc:
-                raise click.ClickException(
-                    f"Invalid Volume Index line: {line!r}"
-                ) from exc
-    raise click.ClickException("7z output does not contain a Volume Index")
+    match = re.search(r"^\s*(?:Volume Index|Volume)\s*=\s*(\d+)\s*$", output, re.MULTILINE)
+    if match:
+        return int(match.group(1))
+    if result.returncode == 0:
+        # A regular, non-split ZIP has no volume metadata.
+        return 0
+    raise click.ClickException(
+        f"Unable to determine split archive volume count for {archive.name}: "
+        f"{output.strip()}"
+    )
 
 
 def fetch_source_database(destination: Path) -> None:
